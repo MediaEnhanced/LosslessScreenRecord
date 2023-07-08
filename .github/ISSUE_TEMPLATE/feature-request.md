@@ -2,7 +2,7 @@
 name: Feature Request
 about: How can this program be enhanced?
 title: 'FR: [Feature Title]'
-labels: enhancement
+labels: enhancement, question
 assignees: MediaEnhanced
 
 ---
