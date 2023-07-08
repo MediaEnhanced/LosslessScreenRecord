@@ -861,17 +861,17 @@ void startP() {
 	uint64_t fps = 60;
 	uint64_t recordSeconds = 60;
 	
-	error = desktopDuplicationSetFrameRate(fps);
-	EXIT_ON_ERROR(error);
+	int ddError = desktopDuplicationSetFrameRate(fps);
+	EXIT_ON_ERROR(ddError);
 	uint64_t numOfFrames = fps * recordSeconds;
 	uint64_t numWrittenFrames = 0;
 	uint64_t sleepTotal = 0;
 	while (numWrittenFrames < numOfFrames) {
-		error = desktopDuplicationEncodeNextFrame(h265File, &numWrittenFrames);
-		if (error > 1000) {
+		ddError = desktopDuplicationEncodeNextFrame(h265File, &numWrittenFrames);
+		if (ddError > 1000) {
 			break;
 		}
-		else if (error > 1) {
+		else if (ddError > 1) {
 			//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, (error-1), NUM_FORMAT_UNSIGNED_INTEGER);
 			//compatibilitySleepFast(1);//error-1);
 			sleepTotal++;
@@ -881,15 +881,17 @@ void startP() {
 	//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, sleepTotal, NUM_FORMAT_UNSIGNED_INTEGER);
 	//*/
 	
+	
 	//Close (and Save) Output Bitstream File
 	error = closeFile(&h265File);
 	EXIT_ON_ERROR(error);
 	
-	if (error > 1000) {
-		if (error == ERROR_RARE_TIMING_DESYNC) {
+	if (ddError > 1000) {
+		if (ddError == ERROR_RARE_TIMING_DESYNC) {
 			consolePrintLine(29);
 		}
 		consolePrintLine(30);
+		EXIT_ON_ERROR(ddError);
 	}
 	else {
 		consolePrintLine(31);
