@@ -1,0 +1,30 @@
+Program Ran Successfully!
+Program Error: 
+Extra Error Info: 
+WSA Error Info: 
+DD Error Info: 
+Vulkan Error Info: 
+nvEncode Error Info: 
+Press <Enter> to Exit
+Total Program Run Time: 
+us
+ms
+s
+m
+h
+d
+ microseconds
+ milliseconds
+ seconds
+ minutes
+ hours
+ days
+Program Started!
+ỤȾƑ-8 įṡ Ẅồřκȉȵɠ
+Press <Enter> to Continue
+Attempting to Startup Desktop Duplication
+Desktop Duplication Successfully Started
+Press <Enter> to Start Recording
+Recording 60 seconds at 60 fps
+A rare timing error occurred... please try program again!
+Recording Finshed and Saved: "bitstream.h265"

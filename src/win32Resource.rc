@@ -1,0 +1,2 @@
+#include "winuser.h" //Used to reference the RT_MANIFEST define which is 24
+1 RT_MANIFEST win32AppManifest.xml //Resource Manifest filename in same directory
