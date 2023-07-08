@@ -869,23 +869,13 @@ void startP() {
 	while (numWrittenFrames < numOfFrames) {
 		error = desktopDuplicationEncodeNextFrame(h265File, &numWrittenFrames);
 		if (error > 1000) {
-			desktopDuplicationPrintEncodingStats();
-			//closeFile(&h265File);
-			if (error == ERROR_RARE_TIMING_DESYNC) {
-				consolePrintLine(29);
-			}
-			exitP(error);
+			break;
 		}
-		//consoleBufferFlush();
-		
-		if (error > 1) {
+		else if (error > 1) {
 			//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, (error-1), NUM_FORMAT_UNSIGNED_INTEGER);
 			//compatibilitySleepFast(1);//error-1);
 			sleepTotal++;
 		}
-		
-		//consolePrintLine(29);
-		
 	}
 	desktopDuplicationPrintEncodingStats();
 	//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, sleepTotal, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -895,7 +885,15 @@ void startP() {
 	error = closeFile(&h265File);
 	EXIT_ON_ERROR(error);
 	
-	consolePrintLine(30);
+	if (error > 1000) {
+		if (error == ERROR_RARE_TIMING_DESYNC) {
+			consolePrintLine(29);
+		}
+		consolePrintLine(30);
+	}
+	else {
+		consolePrintLine(31);
+	}
 	
 	//Stop Desktop Duplication
 	desktopDuplicationStop();
