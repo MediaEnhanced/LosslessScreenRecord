@@ -20,11 +20,12 @@
 //SOFTWARE.
 
 
-//Media Enhanced OS Compatibility Implementation for Console-Based Programs
-//Windows Version that uses UTF-8 for the console but converts to UTF-16
+//Media Enhanced Windows Compatibility Implementation for Console-Based Programs
+//Uses UTF-8 for the console but converts to UTF-16
 //when neccessary to communicate with the win32 API
 //Error Checking is a mixed bag... especially for the non-fast functions
-#include "compatibility.h"
+#include "compatibility.h" 
+#include "math.h" //Includes the math function definitions needed for gcd
 
 // Compatibility State Codes:
 #define COMPATIBILITY_STATE_UNDEFINED 0
@@ -32,41 +33,12 @@
 #define COMPATIBILITY_STATE_FULL 2
 static uint64_t compatibilityState = COMPATIBILITY_STATE_UNDEFINED;
 
-void* memcpyBasic(void* dest, const void* src, size_t count) {
-	uint64_t count8 = (uint64_t) (count >> 3);
-	
-	uint64_t* destCpy8 = (uint64_t*) dest;
-	uint64_t* srcCpy8 = (uint64_t*) src;
-	while (count8 > 0) {
-		*destCpy8 = *srcCpy8;
-		destCpy8++;
-		srcCpy8++;
-		count8--;
-	}
-	
-	uint64_t count1 = (uint64_t) (count & 0x7);
-	uint8_t* destCpy1 = (uint8_t*) destCpy8;
-	uint8_t* srcCpy1 = (uint8_t*) srcCpy8;
-	while (count1 > 0) {
-		*destCpy1 = *srcCpy1;
-		destCpy1++;
-		srcCpy1++;
-		count1--;
-	}
-	
-	return dest;
-}
-
-//Assumes that computer operates with little-endianess (reasonable assumption)
-static uint64_t shortByteSwap(uint64_t value) {
-	return ((value & 0xFF00) >> 8) | ((value & 0xFF) << 8);
-}
-
 #define UNICODE //defined before any includes, dictates that Windows function defaults will work with Unicode UTF-16(LE) encoded strings
 #define _UNICODE //similar definition
 #define WIN32_LEAN_AND_MEAN //Excludes several unnecessary includes when using windows.h
 #include <windows.h> //Includes win32 functions and helper macros (uses UNICODE define)
 
+#define INITGUID //So there is no need to link to libdxguid.a (smaller .rdata section size too)
 #include <dxgi1_6.h> //Needed to get adapters (GPU devices)
 #include <d3d11.h>   //Windows DirectX 11: Version 11.1 is needed for Desktop Duplication
 
@@ -74,7 +46,7 @@ static uint64_t shortByteSwap(uint64_t value) {
 #define VK_USE_PLATFORM_WIN32_KHR //Define Vulkan To Use 
 #include "include/vulkan/vulkan.h"
 
-#include "include/cudart/cuda.h"
+#include "include/cuda/cuda.h"
 #include "include/nvEncodeAPI.h"
 
 #include <winsock2.h> //Windows Networking Header
@@ -2307,24 +2279,6 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 	return 0;
 }
 
-static uint32_t greatestCommonDivisor(uint32_t a, uint32_t b) {
-	while ((a > 0) && (b > 0)) {
-		if (a > b) {
-			a = a % b;
-			if (a == 0) {
-				return b;
-			}
-		}
-		else {
-			b = b % a;
-			if (b == 0) {
-				return a;
-			}
-		}
-	}
-	return 0;
-}
-
 static int cuExtraInfo = CUDA_SUCCESS;
 
 static CUdevice cuDevice = 0;
@@ -3848,6 +3802,11 @@ void nvEncodeGetError(int* error) {
 	*error = nvEncExtraInfo;
 }
 
+
+//Assumes that computer operates with little-endianess (reasonable assumption)
+static uint64_t shortByteSwap(uint64_t value) {
+	return ((value & 0xFF00) >> 8) | ((value & 0xFF) << 8);
+}
 
 #define RETURN_ON_INVALID_SOCKET(socket) ({if (networkSocket == INVALID_SOCKET) {	return ERROR_WSA_EXTRA_INFO; }})
 #define RETURN_ON_SOCKET_ERROR(error) ({if (error == SOCKET_ERROR) {	return ERROR_WSA_EXTRA_INFO; }})

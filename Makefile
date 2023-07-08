@@ -1,39 +1,77 @@
+#MIT License
+#Copyright (c) 2023 Jared Loewenthal
+#
+#Permission is hereby granted, free of charge, to any person obtaining a copy
+#of this software and associated documentation files (the "Software"), to deal
+#in the Software without restriction, including without limitation the rights
+#to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+#copies of the Software, and to permit persons to whom the Software is
+#furnished to do so, subject to the following conditions:
+#
+#The above copyright notice and this permission notice shall be included in all
+#copies or substantial portions of the Software.
+#
+#THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+#OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+#SOFTWARE.
+
+#Makefile to create the Windows Lossless Screen Record program executable
+#designed to be run by MinGW-w64's make (mingw32-make.exe)
+#Can only currently be run on Windows and expects the following programs
+#to be on the System PATH:
+# MinGW-w64 Binaries (bin folder in downloadable: https://winlibs.com/)
+# FASM.exe from flatassembler for Windows: https://flatassembler.net/
+# glslangValidator.exe from the Vulkan SDK: https://vulkan.lunarg.com/
+
+#The default target is for Windows 
 default_target: WindowsExecutables
 
+#create directories when needed
 ./bin/:
 	cmd /c mkdir .\bin
 
 ./bin/obj/:
 	cmd /c mkdir .\bin\obj
 
-./bin/lib/:
-	cmd /c mkdir .\bin\lib
-
 ./bin/spv/:
 	cmd /c mkdir .\bin\spv
 
+#Common Compiler (gcc) arguments
 CompilerArguments = -std=c11 -O2 -m64 -mconsole -mabi=ms
-  # -ffreestanding
+  # -ffreestanding... look into later
 CompilerWarnings = -Wall
  # -Wextra -Wwrite-strings -pedantic -g3 More Warnings in the future
-CompatibilityHeaders = ./src/compatibility.h ./src/helperFunctions.h
 
-./bin/obj/compatibility.o: ./src/compatibilityWin32.c $(CompatibilityHeaders) | ./bin/obj/
-	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibility.o ./src/compatibilityWin32.c
+./bin/obj/compatibility.o: ./src/compatibility.c ./src/compatibility.h | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibility.o ./src/compatibility.c
 
-./bin/obj/helperFunctions.o: ./src/helperFunctions.asm | ./bin/obj/
-	FASM ./src/helperFunctions.asm ./bin/obj/helperFunctions.o
+./bin/obj/compatibilityAssembly.o: ./src/compatibilityAssembly.asm | ./bin/obj/
+	FASM ./src/compatibilityAssembly.asm ./bin/obj/compatibilityAssembly.o
 
-./bin/obj/log2.o: ./src/log2.c | ./bin/obj/
+./bin/obj/compatibilityWin32.o: ./src/compatibilityWin32.c ./src/compatibility.h ./src/math.h | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibilityWin32.o ./src/compatibilityWin32.c
+
+CompatibilityWindowsObjects = ./bin/obj/compatibilityWin32.o ./bin/obj/compatibility.o ./bin/obj/compatibilityAssembly.o
+
+./bin/obj/math.o: ./src/math.c ./src/math.h | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/math.o ./src/math.c
+
+./bin/obj/mathAssembly.o: ./src/mathAssembly.asm | ./bin/obj/
+	FASM ./src/mathAssembly.asm ./bin/obj/mathAssembly.o
+
+./bin/obj/log2.o: ./src/log2.c ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/log2.o ./src/log2.c
 	
-./bin/obj/exp2.o: ./src/exp2.c | ./bin/obj/
+./bin/obj/exp2.o: ./src/exp2.c ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/exp2.o ./src/exp2.c
 
-./bin/lib/math.a: ./bin/obj/log2.o ./bin/obj/exp2.o | ./bin/lib/
-	ar cr ./bin/lib/math.a ./bin/obj/log2.o ./bin/obj/exp2.o
+MathObjects = ./bin/obj/log2.o ./bin/obj/exp2.o ./bin/obj/math.o ./bin/obj/mathAssembly.o 
 
-./bin/obj/main.o: ./src/main.c $(CompatibilityHeaders) | ./bin/obj/
+./bin/obj/main.o: ./src/main.c ./src/compatibility.h ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/main.o ./src/main.c
 
 ./bin/CreateStringsData.exe: ./src/createStringsData.c ./src/elf.h | ./bin
@@ -56,43 +94,35 @@ CompatibilityHeaders = ./src/compatibility.h ./src/helperFunctions.h
 ./bin/obj/win32Resource.o: ./src/win32Resource.rc ./src/win32AppManifest.xml | ./bin/obj/
 	windres -o ./bin/obj/win32Resource.o -i ./src/win32Resource.rc -O coff
 
-./bin/FixExecutableCudaDLL.exe: ./src/fixExecutableCudaDll.c | ./bin
-	gcc $(CompilerArguments) $(CompilerWarnings) -s -o ./bin/FixExecutableCudaDLL.exe ./src/fixExecutableCudaDll.c
-
-./bin/CheckLosslessSRGBtoYUV.exe: ./src/checkLosslessSRGBtoYUV.c ./src/helperFunctions.h ./bin/obj/helperFunctions.o
-	gcc $(CompilerArguments) $(CompilerWarnings) -s -o ./bin/CheckLosslessSRGBtoYUV.exe ./src/checkLosslessSRGBtoYUV.c ./bin/obj/helperFunctions.o
+./bin/CheckLosslessSRGBtoYUV.exe: ./src/checkLosslessSRGBtoYUV.c ./src/math.h ./bin/obj/mathAssembly.o
+	gcc $(CompilerArguments) $(CompilerWarnings) -s -o ./bin/CheckLosslessSRGBtoYUV.exe ./src/checkLosslessSRGBtoYUV.c ./bin/obj/mathAssembly.o
 
 CheckLossless: ./bin/CheckLosslessSRGBtoYUV.exe
 	./bin/CheckLosslessSRGBtoYUV.exe
 
-LocalLibraryDirectory = -L./bin/lib/
-LocalLibraries = -l:math.a
+LocalLibraryDirectory = -L./lib/
+LocalLibraries = -l:vulkan-1.lib -l:cuda.lib -l:nvencodeapi.lib
+ # vulkan-1.lib is needed for Vulkan ("Middleman" Compute Pipeline)
+ # cuda.lib & nvencodeapi.lib is needed for NVIDIA Encoding
 
 WindowsLibraryDirectory = -LC:/Windows/System32
-Libraries = -l:kernel32.dll -l:dxgi.dll -l:d3d11.dll -l:vulkan-1.dll -l:nvCuda.dll -l:nvEncodeAPI64.dll -l:ws2_32.dll
- # -l:gdi32.dll
- # ws2_32 is used for windows networking (sockets)
- # -lgdi32 -ld3d11 is used for windows desktop duplication
+Libraries = -l:kernel32.dll -l:dxgi.dll -l:d3d11.dll -l:ws2_32.dll
+ # kernel32.dll is needed for the basic Window OS API interface
+ # dxgi.dll & d3d11.dll is needed for Windows Desktop Duplication
+ # ws2_32.dll is needed for Windows networking (sockets)
 
 LinkerLibraries = $(LocalLibraryDirectory) $(LocalLibraries) $(WindowsLibraryDirectory) $(Libraries)
-
-Mingw64LibraryDirectories = -LC:/mingw64/x86_64-w64-mingw32/lib -LC:/mingw64/lib
-Mingw64Libraries = -ldxguid -lmingwex
- # -ldxguid is needed for the definitions of the GUID (used for windows desktop duplication under DirectX 11
- # -lmingwex needed for log2.c fma function "calls"
 
 gccLibraryDirectory = -LC:/mingw64/lib/gcc/x86_64-w64-mingw32/13.1.0
 gccLibraries = -lgcc
  #needed for gcc automatic windows function stack correction (when a function uses more than 4096 bytes / a page for the stack)
 
-TempLibraries = $(Mingw64LibraryDirectories) $(Mingw64Libraries) $(gccLibraryDirectory) $(gccLibraries)
+TempLibraries = $(gccLibraryDirectory) $(gccLibraries)
 
-./bin/LosslessScreenRecord.exe: ./bin/obj/compatibility.o ./bin/obj/helperFunctions.o ./bin/lib/math.a ./bin/obj/main.o ./bin/obj/stringsData.o ./bin/obj/binData.o ./bin/obj/win32Resource.o ./bin/FixExecutableCudaDLL.exe
+./bin/LosslessScreenRecord.exe: ./bin/obj/main.o $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/stringsData.o ./bin/obj/binData.o ./bin/obj/win32Resource.o ./bin/FixExecutableCudaDLL.exe
 	ld -o ./bin/LosslessScreenRecord.exe -estartP -s -static --gc-sections \
-	./bin/obj/compatibility.o ./bin/obj/helperFunctions.o ./bin/lib/math.a ./bin/obj/main.o ./bin/obj/stringsData.o ./bin/obj/binData.o ./bin/obj/win32Resource.o \
+	./bin/obj/main.o $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/stringsData.o ./bin/obj/binData.o ./bin/obj/win32Resource.o \
 	$(LinkerLibraries) $(TempLibraries)
-	./bin/FixExecutableCudaDLL.exe ./bin/LosslessScreenRecord.exe
- #Correct the improper nvCuda.dll naming in the final executable
 
 WindowsExecutables: ./bin/LosslessScreenRecord.exe
 

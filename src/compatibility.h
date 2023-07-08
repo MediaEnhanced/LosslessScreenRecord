@@ -20,30 +20,128 @@
 //SOFTWARE.
 
 
-//Media Enhanced OS Compatibility Helper for console-based programs
-//Reusable gcc header file for x64 architectures
+//Media Enhanced OS Compatibility Function Definitions for Console Programs
 #ifndef MEDIA_ENHANCED_COMPATIBILITY_H
 #define MEDIA_ENHANCED_COMPATIBILITY_H
 
 #include <stdint.h>	//Defines Data Types: https://en.wikipedia.org/wiki/C_data_types
-#include "helperFunctions.h" //Defines the helper functions
 
-//link in externaly created stringsData.o "compiled" data file
-extern uint8_t stringsData[];
-extern uint32_t stringsIndicies[];
+//The Microsoft x64 calling convention is used in all of the assembly functions:
+//https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170 
+#define ASM_CALLING_CONVENTION __attribute__((ms_abi))
 
-//Unions for 32-bit and 64-bit numbers
-union num32 {
-	uint32_t u;
-	int32_t i;
-	float f;
-};
+// Necessary Fast Helper (Assembly) Functions:
+uint64_t ASM_CALLING_CONVENTION numToFHexStr(uint64_t number, char* strPtr);
+uint64_t ASM_CALLING_CONVENTION numToPHexStr(uint64_t number, char* strPtr);
+uint64_t ASM_CALLING_CONVENTION numToUDecStr(char* strPtr, uint64_t number);
 
-union num64 {
-	uint64_t u;
-	int64_t i;
-	double f;
-};
+//uint64_t ASM_CALLING_CONVENTION numToSDecStr(uint64_t number, char* strPtr);
+uint64_t ASM_CALLING_CONVENTION shortToDecStr(char* strPtr, uint64_t number);
+
+
+
+
+void* memcpyBasic(void* dest, const void* src, size_t count);
+
+
+
+// Bare Console Functions:
+void consoleWriteLineDirect(char* strUTF8, uint64_t strBytes);
+void consoleWriteLineWithNumberDirect(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat);
+void getCompatibilityExtraError(int* error);
+void consoleWaitForEnter();
+
+// Time / Performance Functions:
+uint64_t getCurrentTime();
+void incDiffTime(uint64_t* countTime, uint64_t startTime, uint64_t endTime);
+uint64_t getDiffTimeMicroseconds(uint64_t startTime, uint64_t endTime);
+uint64_t getDiffTimeMilliseconds(uint64_t startTime, uint64_t endTime);
+uint64_t getDiffTimeSeconds(uint64_t startTime, uint64_t endTime);
+uint64_t getEndTimeFromMicroDiff(uint64_t startTime, uint64_t usDiff);
+uint64_t getEndTimeFromMilliDiff(uint64_t startTime, uint64_t msDiff);
+
+// Start and Exit (Stop) Compatibility:
+int startFullCompatibility();
+void exitCompatibility(int returnError);
+
+// Memory Operations:
+int getCompatibilityNewMemoryPage(void** memoryPtr, uint64_t* memoryBytes);
+int tryCompatibilitySetupLargeMemoryPages();
+int allocCompatibilityMemory(void** memoryPtr, uint64_t memoryBytes, uint64_t largePage);
+int deallocCompatibilityMemory(void** memoryPtr);
+
+// Console Write and Read Functions:
+int consoleBufferSetup();
+int consoleBufferFlush();
+int consoleBufferTerminate(uint64_t flush);
+int consoleWrite(char* strUTF8, uint64_t strBytes, uint64_t conExtraInfo);
+void consoleWriteLineFast(char* strUTF8, uint64_t strBytes);
+void consoleWriteLineSlow(char* strUTF8);
+int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat, uint64_t conExtraInfo);
+void consoleWriteLineWithNumberFast(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat);
+int consoleControl(uint64_t conInstruction, uint64_t conExtraValue);
+
+// Program Argument Handling:
+int getCompatibilityArgument(uint64_t argumentNumber, char** argumentUTF8, uint64_t* argumentByteLength);
+int getCompatibilityNextArgument(char** argumentUTF8, uint64_t* argumentByteLength);
+
+int compatibilitySleep(uint64_t milliseconds);
+void compatibilitySleepFast(uint64_t milliseconds);
+
+int getCompatibilityTimestamp(uint64_t* timestamp);
+int getCompatibilityMilliseconds(uint64_t* milliseconds);
+
+int setCompatibilityMemoryPageBuffer();
+
+// File Management Functions:
+int openFile(void** filePtr, uint64_t flags, char* filePathUTF8, int filePathBytes);
+int closeFile(void** filePtr);
+int getFileSize(void** filePtr, uint64_t* fileSizeBytes);
+int readFile(void** filePtr, void* dataPtr, uint32_t numBytes);
+int writeFile(void* filePtr, void* dataPtr, uint32_t numBytes);
+int selectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8);
+
+void readFileFast(void** filePtr, void* dataPtr, uint32_t numBytes);
+void writeFileFast(void** filePtr, void* dataPtr, uint32_t numBytes);
+
+int desktopDuplicationStart(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
+int desktopDuplicationLoadLUT();
+int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr);
+
+int desktopDuplicationGetFrame();
+
+int desktopDuplicationSetFrameRate(uint64_t fps);
+int desktopDuplicationEncodeNextFrame(void* bitstreamFilePtr, uint64_t* frameWriteCount);
+int desktopDuplicationPrintEncodingStats();
+
+int desktopDuplicationStop();
+void desktopDuplicationGetError(int* error);
+void vulkanGetError(int* error);
+void nvEncodeGetError(int* error);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 // Compatibility Error Codes:
@@ -185,81 +283,9 @@ union num64 {
 
 #define ERROR_NVENC_EXTRA_INFO 0x9000
 
-void* memcpyBasic(void* dest, const void* src, size_t count);
 
-// Bare Console Functions:
-void consoleWriteLineDirect(char* strUTF8, uint64_t strBytes);
-void consoleWriteLineWithNumberDirect(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat);
-void getCompatibilityExtraError(int* error);
-void consoleWaitForEnter();
 
-// Time / Performance Functions:
-uint64_t getCurrentTime();
-void incDiffTime(uint64_t* countTime, uint64_t startTime, uint64_t endTime);
-uint64_t getDiffTimeMicroseconds(uint64_t startTime, uint64_t endTime);
-uint64_t getDiffTimeMilliseconds(uint64_t startTime, uint64_t endTime);
-uint64_t getDiffTimeSeconds(uint64_t startTime, uint64_t endTime);
-uint64_t getEndTimeFromMicroDiff(uint64_t startTime, uint64_t usDiff);
-uint64_t getEndTimeFromMilliDiff(uint64_t startTime, uint64_t msDiff);
 
-// Start and Exit (Stop) Compatibility:
-int startFullCompatibility();
-void exitCompatibility(int returnError);
-
-// Memory Operations:
-int getCompatibilityNewMemoryPage(void** memoryPtr, uint64_t* memoryBytes);
-int tryCompatibilitySetupLargeMemoryPages();
-int allocCompatibilityMemory(void** memoryPtr, uint64_t memoryBytes, uint64_t largePage);
-int deallocCompatibilityMemory(void** memoryPtr);
-
-// Console Write and Read Functions:
-int consoleBufferSetup();
-int consoleBufferFlush();
-int consoleBufferTerminate(uint64_t flush);
-int consoleWrite(char* strUTF8, uint64_t strBytes, uint64_t conExtraInfo);
-void consoleWriteLineFast(char* strUTF8, uint64_t strBytes);
-void consoleWriteLineSlow(char* strUTF8);
-int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat, uint64_t conExtraInfo);
-void consoleWriteLineWithNumberFast(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat);
-int consoleControl(uint64_t conInstruction, uint64_t conExtraValue);
-
-// Program Argument Handling:
-int getCompatibilityArgument(uint64_t argumentNumber, char** argumentUTF8, uint64_t* argumentByteLength);
-int getCompatibilityNextArgument(char** argumentUTF8, uint64_t* argumentByteLength);
-
-int compatibilitySleep(uint64_t milliseconds);
-void compatibilitySleepFast(uint64_t milliseconds);
-
-int getCompatibilityTimestamp(uint64_t* timestamp);
-int getCompatibilityMilliseconds(uint64_t* milliseconds);
-
-int setCompatibilityMemoryPageBuffer();
-
-// File Management Functions:
-int openFile(void** filePtr, uint64_t flags, char* filePathUTF8, int filePathBytes);
-int closeFile(void** filePtr);
-int getFileSize(void** filePtr, uint64_t* fileSizeBytes);
-int readFile(void** filePtr, void* dataPtr, uint32_t numBytes);
-int writeFile(void* filePtr, void* dataPtr, uint32_t numBytes);
-int selectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8);
-
-void readFileFast(void** filePtr, void* dataPtr, uint32_t numBytes);
-void writeFileFast(void** filePtr, void* dataPtr, uint32_t numBytes);
-
-int desktopDuplicationStart(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
-int desktopDuplicationLoadLUT();
-int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr);
-
-int desktopDuplicationGetFrame();
-
-int desktopDuplicationSetFrameRate(uint64_t fps);
-int desktopDuplicationEncodeNextFrame(void* bitstreamFilePtr, uint64_t* frameWriteCount);
-int desktopDuplicationPrintEncodingStats();
-
-int desktopDuplicationStop();
-void desktopDuplicationGetError(int* error);
-void vulkanGetError(int* error);
-void nvEncodeGetError(int* error);
 
 
 // Network Functions:

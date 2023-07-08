@@ -29,7 +29,7 @@
 #include <stdio.h>	//Needed for printf statements and general file operations
 #include <string.h> //Needed for memset
 
-#include "helperFunctions.h"
+#include "math.h"
 
 #define SRGB_MAX_VALUE 256
 #define NUM_SRGB_VALUES 16777216 //SRGB_MAX_VALUE ^ 3
@@ -265,7 +265,7 @@ int main(int argc, char* argv[]) {
 	memset((void*) conversionResults, 0, NUM_POSSIBLE_RESULTS * sizeof(uint16_t));
 	
 	printf("Testing FFMPEG 709 sRGB to YCbCr (YUV) Conversion:\n");
-	testSRGBtoYCbCr709FFMPEG(conversionLUT, conversionResults);
+	testSRGBtoYCbCr709(conversionLUT, conversionResults);
 	uint32_t uniqueValues = 0;
 	uint32_t failures = 0;
 	for (uint32_t r=0; r<NUM_POSSIBLE_RESULTS; r++) {

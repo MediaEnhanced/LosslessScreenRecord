@@ -20,19 +20,41 @@
 //SOFTWARE.
 
 
-//RealTime QUIC Client
-//Originally designed to be compiled with gcc (using MinGW-w64 for Windows)
-// More Details Here in the future
+//This is the main file for the Lossless Screen Record program for x64
+//processor architecture targets and is designed to be compiled by gcc
+//This top-level program file contains the entry point and OS independent code
+//When OS dependent functionality needs to be used, the linked in compatibility
+//functions get called which share the same function definitions (prototypes)
+//These functions make their own calls to the OS API and abstract it away from
+//the main program (sometimes the majority of the code executed are in these functions)
+//The program avoids using any runtime library functions which usually vary
+//between OSes and insteads calls specific implementations for relevant functions
+// More Details Here in the Future
 
-//include cross x64 architecture OS compatibility
-#include "compatibility.h" //always includes stdint.h
-#include "math.h"
+#include "compatibility.h" //Includes <stdint.h> too
+#include "math.h" //Includes the math function definitions
 
-#define EXIT_ON_ERROR(error) ({if (error != 0) { exitP(error); }})
-#define EXIT_EARLY (EXIT_ON_ERROR(1));
+//UTF-8 is used Everywhere EXCEPT when calling MOST Windows OS API Functions
+//in which cases the UTF-8 strings will be converted to UTF-16 before being
+//passed along to the function calls
+//This design choice makes it easy to stay consistent across OSes for code
+//editing, string literal storeage, and program runtime (user interactions)
+//It also makes it easier to provide proper localization when necessary
 
+//Seperating string literals from the code makes it easy to translate text to
+//other languages while simply refering to the relevant text as line numbers
+//The UTF-8 strings can be managed in a line seperated text file which gets
+//compiled during the Make process to a string array and linked into the
+//final executable under its own initalized data section
+//The strings data base pointer can be offset using the index data to find the
+//start pointer of a specific text line
+//Note that these strings DO NOT have a 0 byte terminating the text
+extern uint8_t stringsData[];
+extern uint32_t stringsIndices[];
+
+//String Literal Helper Varaibles and Macros:
 static char* strs = (char*) stringsData;
-static uint32_t* strsOff = stringsIndicies;
+static uint32_t* strsOff = stringsIndices;
 
 #define consolePrintLineDirect(line) consoleWriteLineDirect(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1)
 #define consolePrintLineWithNumberDirect(line, number, format) consoleWriteLineWithNumberDirect(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, number, format);
@@ -42,77 +64,18 @@ static uint32_t* strsOff = stringsIndicies;
 #define consolePrintWithNumber(line, number, format, conInfo) consoleWriteWithNumber(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, number, format, conInfo);
 #define consolePrintLineWithNumber(line, number, format) consoleWriteLineWithNumberFast(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, number, format);
 
+//Exit due to error Helper Macros
+#define EXIT_ON_ERROR(error) ({if (error != 0) { exitP(error); }})
+#define EXIT_EARLY (EXIT_ON_ERROR(1));
+
+//During the Make process the GLSL Vulkan Compute Shader gets compiled to SPIR-V
+//and then this binary data gets linked into the program via the following definitons
 extern uint64_t shader_size;
 extern uint8_t  shader_data[];
 
+//Definition constants used for sRGB loops:
 #define SRGB_MAX_VALUE 256
 #define NUM_SRGB_VALUES 16777216
-
-double cbrtFast(double x0) {
-	//Quick cubic root function that expects the input to be between 0.001953125 and 2.0
-	//Uses a small lookup table defined below:
-	
-	const double CBRT2 = 1.2599210498948731648; //2^(1/3)
-	const double SQR_CBRT2 = 1.5874010519681994748; // 2^(2/3)
-	
-	const double cbrtFactors[10] = {
-		CBRT2 * 0.125,
-		SQR_CBRT2 * 0.125,
-		1.0 * 0.25,
-		CBRT2 * 0.25,
-		SQR_CBRT2 * 0.25,
-		1.0 * 0.5,
-		CBRT2 * 0.5,
-		SQR_CBRT2 * 0.5,
-		1.0,
-		CBRT2
-	};
-	
-	union num64 xCon0;
-	xCon0.f = x0;
-	
-	uint64_t expFactor0 = xCon0.i;
-	expFactor0 >>= 52;
-	expFactor0 -= 1014;
-	double f0 = cbrtFactors[expFactor0];
-	
-	xCon0.i &=    0xFFFFFFFFFFFFF; //Clear Exponential and Sign Bits of Number
-	xCon0.i |= 0x3FE0000000000000; //Set value to be in range [0.5, 1.0)
-	
-	double a0 = xCon0.f;
-	
-	double b0 = -0.134661104733595206551;
-	b0 *= a0;
-	b0 += 0.546646013663955245034;
-	b0 *= a0;
-	b0 += -0.954382247715094465250;
-	b0 *= a0;
-	b0 += 1.13999833547172932737;
-	b0 *= a0;
-	b0 += 0.402389795645447521269;
-	
-	double y0 = b0 * f0;
-	
-	double c0, d0;
-	
-	//Do three iterations of Newton's Method to be safe
-	c0 = y0 * y0 * 3.0;
-	d0 = x0 / c0;
-	y0 *= 2.0 / 3.0;
-	y0 += d0;
-	
-	c0 = y0 * y0 * 3.0;
-	d0 = x0 / c0;
-	y0 *= 2.0 / 3.0;
-	y0 += d0;
-	
-	c0 = y0 * y0 * 3.0;
-	d0 = x0 / c0;
-	y0 *= 2.0 / 3.0;
-	y0 += d0;
-	
-	return y0;
-}
 
 double getLinearSRGBChannelValuefromSRGBChannelByte(uint8_t v) {
 	//Uses the sRGB transfer function and operates on a sRGB channel byte independently of the others

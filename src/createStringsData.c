@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
 		else {
 			uint64_t paddingZero = 0;
 			uint8_t sectionNames[] = "\0.shstrtab\0.strtab\0.symtab\0.strData\0";
-			uint8_t symbolNames[] = "\0stringsData\0stringsIndicies\0";
+			uint8_t symbolNames[] = "\0stringsData\0stringsIndices\0";
 			
 			
 			struct elfHeader64 head = {0};

@@ -24,30 +24,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include <stdint.h> /* for uint64_t */
-//#include <math.h>   /* for ldexp and isnan */
-
-union num64 {
-	uint64_t u;
-	uint64_t i;
-	double f;
-};
-
-static double ldexp(double x, int exp) { //assumes exp range is fine
-	union num64 num;
-	num.i = exp + 1023;
-	num.u <<= 52;
-	return x * num.f;
-}
-
-static int isnan(double x) { //good for all inputs?
-  union num64 num;
-	num.f = x;
-	num.i &= 0x7fffffffffffffff;
-	num.i = 0x7ff0000000000000 - num.i;
-	num.u >>= 63;
-	return (int) num.u;
-}
+#include "math.h" //Media Enhanced Change (MEC): Added
+//#include <stdint.h> /* for uint64_t */ //MEC: Now included in math.h
+//#include <math.h>   /* for ldexp and isnan */ //MEC: Now included in math.h
 
 /* Add a + b exactly, such that *hi + *lo = a + b.
    Assumes |a| >= |b|.  */
@@ -82,7 +61,7 @@ static void
 dekker (double *h, double *l, double a, double b)
 {
   *h = a * b;
-  *l = __builtin_fma (a, b, -*h);
+  *l = fmaDouble(a, b, -*h); //MEC: Use Math Library FMA
 }
 
 typedef union { double x; uint64_t n; } d64u64;

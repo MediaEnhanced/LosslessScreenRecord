@@ -24,10 +24,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include <stdint.h>
+#include "math.h" //Media Enhanced Change (MEC): Added
+//#include <stdint.h> //MEC: Now included in math.h
 
-typedef unsigned long long u64;
-typedef unsigned short ushort;
+typedef uint64_t u64; //MEC: More Compiler / OS-dependent friendly
+typedef uint16_t ushort; //MEC: More Compiler / OS-dependent friendly
 typedef union {double f; u64 u;} b64u64_u;
 
 static inline double fasttwosum(double x, double y, double *e){
@@ -43,7 +44,7 @@ static inline double adddd(double xh, double xl, double ch, double cl, double *l
 }
 
 static inline double muldd(double xh, double xl, double ch, double cl, double *l){
-  double ahlh = ch*xl, alhh = cl*xh, ahhh = ch*xh, ahhl = __builtin_fma(ch, xh, -ahhh);
+  double ahlh = ch*xl, alhh = cl*xh, ahhh = ch*xh, ahhl = fmaDouble(ch, xh, -ahhh); //MEC: Use Math Library FMA
   ahhl += alhh + ahlh;
   ch = ahhh + ahhl;
   *l = (ahhh - ch) + ahhl;
@@ -130,7 +131,7 @@ double cr_log2(double x){
     {-0x1.62e41d56c64p-2, 0x1.47fd2632d2d32p-3, -0x1.5504497831ba7p-4, 0x1.7a3314c5bef3cp-5};
   b64u64_u t = {.f = x};
   int ex = t.u>>52, e = ex - 0x3ff;
-  if (__builtin_expect(!ex, 0)){ // 0 or denormal
+  if (__builtin_expect(!ex, 0)){ // 0 or subnormal
     if(!t.u) return -1.0 / 0.0; // 0 
     int k = __builtin_clzll(t.u);
     e -= k-12;
@@ -138,21 +139,21 @@ double cr_log2(double x){
   }
   if (__builtin_expect(ex >= 0x7ff, 0)){
     if(!(t.u<<1)) return -1.0 / 0.0; // 0
-    if((t.u<<1)>(0x7ffull<<53)) return x; // nan
+    if((t.u<<1)>(0x7ffull<<53)) return x; // nan //MEC: MinGW64 ull denotes 64-bit unsigned integer
     if(t.u>>63) return 0.0 / 0.0; // < 0
     return x; // inf
   }
-  t.u &= ~0ull>>12;
+  t.u &= ~0ull>>12; //MEC: MinGW64 ull denotes 64-bit unsigned integer
   if(__builtin_expect(t.u==0, 0)) return as_log2_exact(e);
   double ed = e;
   u64 i = t.u>>(52-5);
-  long long d = t.u & (~0ull>>17);
-  u64 j = (t.u + ((u64)B[i].c0<<33) + ((long long)B[i].c1*(d>>16)))>>(52-10);
-  t.u |= 0x3ffll<<52;
+  int64_t d = t.u & (~0ull>>17); //MEC: int64_t and ull used to support MinGW64 
+  u64 j = (t.u + ((u64)B[i].c0<<33) + ((int64_t)B[i].c1*(d>>16)))>>(52-10); //MEC: int64_t used to support MinGW64
+  t.u |= 0x3ffll<<52; //MEC: MinGW64 ull denotes 64-bit unsigned integer
   int i1 = j>>5, i2 = j&0x1f;
   const double l2h = 0x1.71548p+0, l2l = -0x1.ad47a2f472159p-22;
   double r = r1[i1]*r2[i2];
-  double o = r*t.f, dxl = __builtin_fma(r,t.f,-o), dxh = o - l2h, dx = dxh + dxl, dx2 = dx*dx;
+  double o = r*t.f, dxl = fmaDouble(r,t.f,-o), dxh = o - l2h, dx = dxh + dxl, dx2 = dx*dx; //MEC: Use Math Library FMA
   double f = dx2*((c[0] + dx*c[1]) + dx2*(c[2] + dx*c[3]));
   double lt = (l1[i1][1] + l2[i2][1]) + ed;
   double lh = lt + dxh, ll = (lt - lh) + dxh;
@@ -251,25 +252,25 @@ static double __attribute__((noinline)) as_log2_refine(double x, double a){
   static const double cl[3] = {-0x1.71547652b82fep-2, 0x1.2776c50f1ff14p-2, -0x1.ec709dc3eca5dp-3};
   b64u64_u t = {.f = x};
   int ex = t.u>>52, e = ex-0x3ff;
-  if (__builtin_expect(!ex, 0)){ // 0 or denormal
+  if (__builtin_expect(!ex, 0)){ // 0 or subnormal
     int k = __builtin_clzll(t.u);
     e -= k-12;
     t.u <<= k-11;
   }
-  t.u &= ~0ull>>12;
-  t.u |= 0x3ffull<<52;
+  t.u &= ~0ull>>12; //MEC: MinGW64 ull denotes 64-bit unsigned integer
+  t.u |= 0x3ffull<<52; //MEC: MinGW64 ull denotes 64-bit unsigned integer
   double ed = e;
   b64u64_u v = {.f = a - ed + 0x1.00008p+0};
-  u64 i = (v.u - (0x3ffull<<52))>>(52-16);  
+  u64 i = (v.u - (0x3ffull<<52))>>(52-16); //MEC: MinGW64 ull denotes 64-bit unsigned integer
   int i1 = i>>12, i2 = (i>>8)&0xf, i3 = (i>>4)&0xf, i4 = i&0xf;
   double L[3];
   L[0] = LL[0][i1][0] + LL[1][i2][0] + (LL[2][i3][0] + LL[3][i4][0]) + ed;
   L[1] = LL[0][i1][1] + LL[1][i2][1] + (LL[2][i3][1] + LL[3][i4][1]);
   L[2] = LL[0][i1][2] + LL[1][i2][2] + (LL[2][i3][2] + LL[3][i4][2]);
   double t12 = t1[i1]*t2[i2], t34 = t3[i3]*t4[i4];
-  double th = t12*t34, tl = __builtin_fma(t12,t34,-th);
-  double dh = th*t.f, dl = __builtin_fma(th,t.f,-dh);
-  double sh = tl*t.f, sl = __builtin_fma(tl,t.f,-sh);
+  double th = t12*t34, tl = fmaDouble(t12,t34,-th); //MEC: Use Math Library FMA
+  double dh = th*t.f, dl = fmaDouble(th,t.f,-dh); //MEC: Use Math Library FMA
+  double sh = tl*t.f, sl = fmaDouble(tl,t.f,-sh); //MEC: Use Math Library FMA
   double xl, xh = fasttwosum(dh-1, dl, &xl);
   xh = adddd(xh, xl, sh, sl, &xl);
   sl = xh*(cl[0] + xh*(cl[1] + xh*cl[2]));
@@ -278,7 +279,7 @@ static double __attribute__((noinline)) as_log2_refine(double x, double a){
   sh = adddd(sh, sl, L[1], L[2], &sl);
   double v2, v0 = fasttwosum(L[0], sh, &v2), v1 = fasttwosum(v2, sl, &v2);
   t.f = v1;
-  if(__builtin_expect(!(t.u&(~0ull>>12)), 0)){
+  if(__builtin_expect(!(t.u&(~0ull>>12)), 0)){ //MEC: MinGW64 ull denotes 64-bit unsigned integer
     b64u64_u w = {.f = v2};
     if((w.u^t.u)>>63)
       t.u--;
