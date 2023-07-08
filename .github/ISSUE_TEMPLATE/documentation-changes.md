@@ -1,7 +1,7 @@
 ---
 name: Documentation Changes
 about: Ask for specifc documentation improvements
-title: ''
+title: "[Documentation Improvement Title]"
 labels: documentation
 assignees: MediaEnhanced
 
