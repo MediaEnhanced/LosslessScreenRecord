@@ -33,10 +33,10 @@
 &nbsp;
 
 ## How to Provide Feedback
-### I Want To Hear From You!
-&emsp;&emsp;I am actively developing this software tool and want to know how it can be modified and improved to meet other use cases and requirements besides my intended future projects! This can be as simple as letting me know that I should provide more information / better explain certain details of the project or as challenging as asking for me to add support for linux and other graphics card brands. Either way, please make a Feature Request by filling out the fourm and submitting it. I am looking forward to all the ideas I have not even considered!
+### [I Want To Hear From You!](https://github.com/MediaEnhanced/LosslessScreenRecord/issues)
+&emsp;&emsp;I am actively developing this software tool and want to know how it can be modified and improved to meet other use cases and requirements besides my intended future projects! This can be as simple as letting me know that I should provide more documentation information and better explain certain details of the project or as challenging as asking for me to add support for linux and other graphics card brands. Either way please raise a [GitHub issue](https://github.com/MediaEnhanced/LosslessScreenRecord/issues/new/choose) and fill out the relevant fourm. I look forward to ideas I have not even considered!  
 
-&emsp;&emsp;If the software does not work properly as stated and the running computer meets all the requirements then please fill out and submit a Bug Report. This program tool does not do too much on its own but I want to make sure what it does do is functional for all users. If there is something I have overlooked in the design or something else I should be made aware of please create a Discussion post. While I want to keep as much information about this project public as possible, I can be reached more directly and privately at my email: Jared.Loewenthal@proton.me
+&emsp;&emsp;You should submit a Bug Report if the software does not work properly as stated yet the running computer meets all the requirements. This program tool does not do too much on its own but I want to make sure what it does is functional for all users. If there is something I have overlooked in the design or something else I should be made aware of please create a Discussion post. While I want to keep as much information about this project as public as possible, I can be reached more directly and privately at my email: Jared.Loewenthal@proton.me
 
 &nbsp;
 
