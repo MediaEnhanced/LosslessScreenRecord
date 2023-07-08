@@ -1,0 +1,19 @@
+# bin Folder
+bin/
+
+# Object files (both COFF and ELF formats)
+*.o
+
+# Libraries
+*.a
+
+# Compiled Shaders
+*.spv
+
+# Executables
+*.exe
+
+# Media Files
+*.h265
+*.argb
+*.mp4
