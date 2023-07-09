@@ -104,9 +104,13 @@ int selectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8);
 void readFileFast(void** filePtr, void* dataPtr, uint32_t numBytes);
 void writeFileFast(void** filePtr, void* dataPtr, uint32_t numBytes);
 
-int desktopDuplicationStart(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
+int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
 int desktopDuplicationLoadLUT();
 int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr);
+
+int desktopDuplicationStart(uint64_t fps);
+int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount);
+int desktopDuplicationStop();
 
 int desktopDuplicationGetFrame();
 
@@ -114,7 +118,8 @@ int desktopDuplicationSetFrameRate(uint64_t fps);
 int desktopDuplicationEncodeNextFrame(void* bitstreamFilePtr, uint64_t* frameWriteCount);
 int desktopDuplicationPrintEncodingStats();
 
-int desktopDuplicationStop();
+int desktopDuplicationClean();
+
 void desktopDuplicationGetError(int* error);
 void vulkanGetError(int* error);
 void nvEncodeGetError(int* error);

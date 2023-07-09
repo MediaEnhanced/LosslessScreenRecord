@@ -2279,6 +2279,7 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 	return 0;
 }
 
+
 static int cuExtraInfo = CUDA_SUCCESS;
 
 static CUdevice cuDevice = 0;
@@ -2843,8 +2844,7 @@ static int desktopDuplicationSetupNvEnc() {
 }
 
 
-
-int desktopDuplicationStart(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr) {
+int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr) {
 	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
 		return ERROR_NOT_STARTED_ENOUGH;
 	}
@@ -2995,52 +2995,471 @@ int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	return 0;
 }
 
-//Get Next Desktop Image
-static int desktopDuplicationGetNextDesktopImage(uint64_t startTime, uint64_t errorTime, uint64_t* presentationTime) {
-	uint64_t acquireWaitTimeInMS = getDiffTimeMilliseconds(startTime, errorTime);
+
+static VkSubmitInfo ddComputeSubmitInfo = {};
+static NV_ENC_LOCK_BITSTREAM ddEncodeBitstreamLock0 = {};
+static NV_ENC_LOCK_BITSTREAM ddEncodeBitstreamLock1 = {};
+
+static HANDLE ddThreadEndEvent = NULL;
+static HANDLE ddEncodeEvent = NULL;
+static HANDLE ddLockEvent = NULL;
+static HANDLE ddEncodeLockThreadHandle = NULL;
+
+static DWORD WINAPI ddEncodeLockThread(LPVOID lpParam) {
+	uint64_t bitTest = 0;
+	NV_ENC_LOCK_BITSTREAM* bitstreamToLock = &ddEncodeBitstreamLock0;
+	DWORD stopThread = WaitForSingleObject(ddThreadEndEvent, 0);
+	while (stopThread != 0) {
+		DWORD waitRes = WaitForSingleObject(ddEncodeEvent, INFINITE);
+		if (waitRes != 0) {
+			return waitRes;
+		}
+		NVENCSTATUS nvEncRes = nvEncFunList.nvEncLockBitstream(nvEncoder, bitstreamToLock);
+		if (nvEncRes != NV_ENC_SUCCESS) {
+			return nvEncRes;
+		}
+		BOOL setRes = SetEvent(ddLockEvent);
+		if (setRes == 0) {
+			return ERROR_GET_EXTRA_INFO;
+		}
+		bitTest ^= 1; //XOR with 1
+		if (bitTest == 0) {
+			bitstreamToLock = &ddEncodeBitstreamLock0;
+		}
+		else {
+			bitstreamToLock = &ddEncodeBitstreamLock1;
+		}
+		stopThread = WaitForSingleObject(ddThreadEndEvent, 0);
+	}	
 	
-	IDXGIResource* desktopResourcePtr = NULL;
+	return stopThread;
+}
+
+static HANDLE ddOverlapped0Event = NULL;
+static HANDLE ddOverlapped1Event = NULL;
+static OVERLAPPED ddOverlapped0 = {};
+static OVERLAPPED ddOverlapped1 = {};
+static uint64_t ddWriteOffset = 0;
+
+//static VkWin32KeyedMutexAcquireReleaseInfoKHR ddTextureMutex = {};
+
+static uint64_t ddAcquireLatencySum = 0;
+static uint64_t ddComputeLatencySum = 0;
+static uint64_t ddEncodeLatencySum = 0;
+static uint64_t ddAcquireCount = 0;
+static uint64_t ddComputeCount = 0;
+static uint64_t ddEncodeCount = 0;
+static uint64_t ddComputeStartTime = 0;
+static uint64_t ddEncodeStartTime = 0;
+static uint64_t ddRepeatCount = 0;
+static uint64_t ddAcquireMissedTiming = 0;
+static uint64_t ddMiscIssues = 0;
+static uint64_t ddAccumulatedFramesSum = 0;
+
+static uint64_t ddState = 0;
+static uint64_t ddNextFrame = 0;
+static uint64_t ddCounterIDRreset = 0;
+static uint64_t ddCounterIDR = 0;
+static uint64_t ddFrameIntervalTime = 0;
+static uint64_t ddFirstFrameStartTime = 0;
+static uint64_t ddAcquireOffset = 0;
+
+
+int desktopDuplicationStart(uint64_t fps) {
+	if (desktopDuplicationState != DESKDUPL_STATE_STARTED) {
+		return ERROR_NOT_STARTED_ENOUGH;
+	}
+	
+	//Release Frame
+	HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
+	if (hrRes != S_OK) {
+		if (hrRes != DXGI_ERROR_INVALID_CALL) {
+			desktopDuplicationExtraInfo = (int) hrRes;
+			return ERROR_DESKDUPL_RELEASE_FAILED;
+		}
+		//Frame already released
+	}
+	
+	//Fill in Compute and Bitstream Lock Structures
+	ddComputeSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	ddComputeSubmitInfo.pNext = NULL;
+	ddComputeSubmitInfo.waitSemaphoreCount = 0;
+	ddComputeSubmitInfo.pWaitSemaphores = NULL;
+	ddComputeSubmitInfo.pWaitDstStageMask = NULL;
+	ddComputeSubmitInfo.commandBufferCount = 1;
+	ddComputeSubmitInfo.pCommandBuffers = &vulkanComputeCommandBuffers[4];
+	ddComputeSubmitInfo.signalSemaphoreCount = 0;//1;
+	ddComputeSubmitInfo.pSignalSemaphores = NULL;//&vulkanComputeSemaphore;
+	vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, VK_NULL_HANDLE);
+	
+	ddEncodeBitstreamLock0.version = NV_ENC_LOCK_BITSTREAM_VER;
+	ddEncodeBitstreamLock0.doNotWait = 0; //Has to be 0 for synchronous mode... tested and documented
+	ddEncodeBitstreamLock0.getRCStats = 0;
+	ddEncodeBitstreamLock0.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
+	ddEncodeBitstreamLock0.sliceOffsets = NULL;
+	
+	ddEncodeBitstreamLock1.version = NV_ENC_LOCK_BITSTREAM_VER;
+	ddEncodeBitstreamLock1.doNotWait = 0;
+	ddEncodeBitstreamLock1.getRCStats = 0;
+	ddEncodeBitstreamLock1.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
+	ddEncodeBitstreamLock1.sliceOffsets = NULL;
+	
+	//Create NVENC Blocking Thread and Corresponding Events
+	ddThreadEndEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (ddThreadEndEvent == NULL) {
+		return ERROR_EVENT_NOT_CREATED;
+	}
+	ddEncodeEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (ddEncodeEvent == NULL) {
+		return ERROR_EVENT_NOT_CREATED;
+	}
+	ddLockEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (ddLockEvent == NULL) {
+		return ERROR_EVENT_NOT_CREATED;
+	}
+	
+	ddEncodeLockThreadHandle = CreateThread(NULL, 1, ddEncodeLockThread, NULL, 0, NULL);
+	if (ddEncodeLockThreadHandle == NULL) {
+		return ERROR_THREAD_NOT_CREATED;
+	}
+	
+	//Create Windows Async (Overlapped) File Writing Events and Structures
+	ddOverlapped0Event = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (ddOverlapped0Event == NULL) {
+		return ERROR_EVENT_NOT_CREATED;
+	}
+	ddOverlapped1Event = CreateEventA(NULL, FALSE, FALSE, NULL);
+	if (ddOverlapped1Event == NULL) {
+		return ERROR_EVENT_NOT_CREATED;
+	}
+	
+	ddOverlapped0.Internal = 0;
+	ddOverlapped0.InternalHigh = 0;
+	ddOverlapped0.Offset = 0xFFFFFFFF;
+	ddOverlapped0.OffsetHigh = 0xFFFFFFFF;
+	ddOverlapped0.Pointer = 0;
+	ddOverlapped0.hEvent = ddOverlapped0Event;
+	
+	ddOverlapped1.Internal = 0;
+	ddOverlapped1.InternalHigh = 0;
+	ddOverlapped1.Offset = 0xFFFFFFFF;
+	ddOverlapped1.OffsetHigh = 0xFFFFFFFF;
+	ddOverlapped1.Pointer = 0;
+	ddOverlapped1.hEvent = ddOverlapped1Event;
+	
+	ddWriteOffset = 0;
+	
+	/*
+	uint64_t mutexKey = 0;
+	uint32_t timeout = 1;
+	
+	ddTextureMutex.sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR;
+	ddTextureMutex.pNext = NULL;
+	ddTextureMutex.acquireCount = 1;
+	ddTextureMutex.pAcquireSyncs = &vulkanMemGPUimport;
+	ddTextureMutex.pAcquireKeys = &mutexKey;
+	ddTextureMutex.pAcquireTimeouts = &timeout;
+	ddTextureMutex.releaseCount = 1;
+	ddTextureMutex.pReleaseSyncs = &vulkanMemGPUimport;
+	ddTextureMutex.pReleaseKeys = &mutexKey;
+	//*/
+	
+	// Acquire Next Frame (if there is one)
 	DXGI_OUTDUPL_FRAME_INFO frameInfo;
+	IDXGIResource* desktopResourcePtr = NULL;
+	hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, 1000 / fps, &frameInfo, &desktopResourcePtr);
+	if (hrRes == S_OK) { //Acquired Something (Might just be mouse stuff)
+		//uint64_t ddLastPresentationTime = (uint64_t) frameInfo.LastPresentTime.QuadPart;
+		//if(ddLastPresentationTime != 0) { //Actually acquired new image
+			//consoleWriteLineWithNumberFast("Accumulated F: ", 15, frameInfo.AccumulatedFrames, NUM_FORMAT_UNSIGNED_INTEGER);
+		//}
+		//else { //probably acquired mouse change info... last frame still applies
+		//
+		//}
+	}
+	else if (hrRes != DXGI_ERROR_WAIT_TIMEOUT) { //Something happened
+		desktopDuplicationExtraInfo = (int) hrRes;
+		return ERROR_DESKDUPL_ACQUIRE_FAILED;
+	}
 	
-	uint64_t acquiredDesktopImage = 0;
-	while (acquiredDesktopImage == 0) {
-		//Release Frame First
-		HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-		if (hrRes != S_OK) {
-			if (hrRes != DXGI_ERROR_INVALID_CALL) {
-				desktopDuplicationExtraInfo = (int) hrRes;
-				return ERROR_DESKDUPL_RELEASE_FAILED;
-			}
-			//Frame already released
-		}
-		
-		hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, acquireWaitTimeInMS, &frameInfo, &desktopResourcePtr);
-		if (hrRes == S_OK) { //Acquired Something (Might just be mouse stuff)
-			uint64_t framePresentTime = (uint64_t) frameInfo.LastPresentTime.QuadPart;
-			if(framePresentTime != 0) { //Actually acquired image
-				*presentationTime = framePresentTime;
-				acquiredDesktopImage = 1; //Could return right here!
-			}
-			else { //probably acquired mouse change info... need to try again
-				uint64_t currentTime = getCurrentTime();
-				acquireWaitTimeInMS = getDiffTimeMilliseconds(currentTime, errorTime);
-			}
-		}
-		else { //Unfortunately failed to acquire next Desktop Image
-			if (hrRes == DXGI_ERROR_WAIT_TIMEOUT) { //Just Timed Out
-				return ERROR_DESKDUPL_ACQUIRE_TIMEOUT;
+	uint64_t currentTime = getCurrentTime();
+	
+	//Start Compute Immediately:
+	vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, vulkanComputeFence);
+	ddAcquireLatencySum = 0;//currentTime - ddLastPresentationTime;
+	ddComputeLatencySum = 0;
+	ddEncodeLatencySum = 0;
+	ddAcquireCount = 0; //1
+	ddComputeCount = 0;
+	ddEncodeCount = 0;
+	ddComputeStartTime = currentTime;
+	ddEncodeStartTime = 0;
+	ddRepeatCount = 0; //Num Duplicate Frames Encoded
+	ddAcquireMissedTiming = 0;
+	ddMiscIssues = 0;
+	ddAccumulatedFramesSum = 0;
+	
+	//Setup Run Variables:
+	ddState = 0b0001000; //Bits: Frame Released | Compute Start Wait | Encode Start Wait | Compute Stage Active | Encoding Active | Write 1 | Write 0
+	ddNextFrame = 1;
+	ddCounterIDR = 0;
+	ddCounterIDRreset = fps * 3;
+	
+	ddFrameIntervalTime = timeCounterFrequency / fps;
+	ddFirstFrameStartTime = currentTime; // + (ddFrameIntervalTime >> 1);
+	ddAcquireOffset = 500 * microsecondDivider;
+	
+	desktopDuplicationState = DESKDUPL_STATE_RUNNING;
+	return 0;
+}
+
+int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
+	if (desktopDuplicationState < DESKDUPL_STATE_RUNNING) {
+		return ERROR_NOT_STARTED_ENOUGH;
+	}
+	
+	if ((ddState & 64) > 0) { //Frame Released
+		uint64_t frameStartTime = ddFirstFrameStartTime + (ddNextFrame * ddFrameIntervalTime);
+		uint64_t frameEndTime = frameStartTime + ddFrameIntervalTime;
+		uint64_t acquireStartTime = frameStartTime + ddAcquireOffset;
+		uint64_t acquireEndTime = frameEndTime + ddAcquireOffset;
+		uint64_t currentTime = getCurrentTime();
+		if (currentTime >= acquireStartTime) {
+			if (currentTime < acquireEndTime) {
+				//consoleWriteLineFast("Acquiring Image", 15);
+				DXGI_OUTDUPL_FRAME_INFO frameInfo;
+				IDXGIResource* desktopResourcePtr = NULL;
+				HRESULT hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, 0, &frameInfo, &desktopResourcePtr);
+				if (hrRes == S_OK) { //Acquired Something (Might just be mouse stuff)
+					uint64_t presentationTime = (uint64_t) frameInfo.LastPresentTime.QuadPart;
+					if (presentationTime >= frameStartTime) { //Actually acquired image and it is in the expected time
+						currentTime = getCurrentTime();
+						ddAcquireLatencySum += currentTime - presentationTime;
+						ddAcquireCount++;
+						ddAccumulatedFramesSum += frameInfo.AccumulatedFrames;
+						if (presentationTime < frameEndTime) { //Image is valid for current frame
+							ddNextFrame++;
+							if ((ddState & 32) > 0) {
+								ddMiscIssues++;
+							}
+							ddState |= 32;
+							ddState &= ~64;
+						}
+						else { //Got a frame but its for the next acquire period so first step is to encode the duplicate
+							ddNextFrame += 2;
+							if ((ddState & 0b110000) > 0) {
+								ddMiscIssues++;
+							}
+							ddState |= 16 | 32;
+							ddState &= ~64;
+						}
+					}
+					else { //probably acquired mouse change info... need to release frame
+						hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
+						if (hrRes != S_OK) {
+							if (hrRes != DXGI_ERROR_INVALID_CALL) {
+								desktopDuplicationExtraInfo = (int) hrRes;
+								return ERROR_DESKDUPL_RELEASE_FAILED;
+							}
+						}
+					}
+				}
+				else if (hrRes != DXGI_ERROR_WAIT_TIMEOUT) { //Failed to acquire next frame but not to timeout
+					desktopDuplicationExtraInfo = (int) hrRes;
+					return ERROR_DESKDUPL_ACQUIRE_FAILED;
+				}
 			}
 			else {
-				desktopDuplicationExtraInfo = (int) hrRes;
-				return ERROR_DESKDUPL_ACQUIRE_FAILED;
+				ddAcquireMissedTiming++; // Missed Timing
+				//ddNextFrame++;
+			}
+			if ((ddState & 64) > 0) { //Encode duplicate frame if did not acquire new frame
+				currentTime = getCurrentTime();
+				if (currentTime >= frameEndTime) {
+					ddNextFrame++;
+					if ((ddState & 16) > 0) {
+						ddMiscIssues++;
+					}
+					ddState |= 16;
+				}
 			}
 		}
 	}
+	
+	if ((ddState & 1) > 0) { //Write Output 0 Check
+		//Check on async file write here
+		//consoleWriteLineFast("Write 0 Check", 13);
+		DWORD waitRes = WaitForSingleObject(ddOverlapped0Event, 0);
+		if (waitRes == 0) { //Write Event Signaled
+			NVENCSTATUS nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff0.bitstreamBuffer);
+			if (nvEncRes != NV_ENC_SUCCESS) {
+				nvEncExtraInfo = nvEncRes;
+				return ERROR_NVENC_EXTRA_INFO;
+			}
+			(*frameWriteCount)++;
+			//consoleWriteLineFast("Wrote to File 0", 15);
+			
+			ddState &= ~1;
+		}
+	}
+	if ((ddState & 2) > 0) { //Write Output 1 Check
+		//Check on async file write here
+		//consoleWriteLineFast("Write 1 Check", 13);
+		DWORD waitRes = WaitForSingleObject(ddOverlapped1Event, 0);
+		if (waitRes == 0) { //Write Event Signaled
+			NVENCSTATUS nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff1.bitstreamBuffer);
+			if (nvEncRes != NV_ENC_SUCCESS) {
+				nvEncExtraInfo = nvEncRes;
+				return ERROR_NVENC_EXTRA_INFO;
+			}
+			(*frameWriteCount)++;
+			//consoleWriteLineFast("Wrote to File 1", 15);
+			
+			ddState &= ~2;
+		}
+	}
+	
+	if ((ddState & 4) > 0) { //Encoding Wait Check
+		//Lock Bitstream to "finish" encoding step
+		//consoleWriteLineFast("Encode Check", 12);
+		DWORD waitRes = WaitForSingleObject(ddLockEvent, 0);
+		if (waitRes == 0) { //Lock Event Signaled
+			//consoleWriteLineFast("Locked Bitstream", 16);
+			
+			uint64_t currentTime = getCurrentTime();
+			ddEncodeLatencySum += currentTime - ddEncodeStartTime;
+			ddEncodeCount++;
+			
+			if ((ddEncodeCount & 1) > 0) { //Odd Frame
+				//consoleWriteLineFast("Write 0", 7);
+				
+				//Start Async Write Here
+				ddOverlapped0.Offset = (DWORD) (ddWriteOffset & 0xFFFFFFFF);
+				ddOverlapped0.OffsetHigh = (DWORD) (ddWriteOffset >> 32);
+				WriteFile((HANDLE) bitstreamFilePtr, ddEncodeBitstreamLock0.bitstreamBufferPtr, ddEncodeBitstreamLock0.bitstreamSizeInBytes, NULL, &ddOverlapped0);
+				ddWriteOffset += ddEncodeBitstreamLock0.bitstreamSizeInBytes;
+				
+				ddState |= 1;
+			}
+			else { //Even Frame
+				//consoleWriteLineFast("Write 1", 7);
+				
+				//Start Async Write Here
+				ddOverlapped1.Offset = (DWORD) (ddWriteOffset & 0xFFFFFFFF);
+				ddOverlapped1.OffsetHigh = (DWORD) (ddWriteOffset >> 32);
+				WriteFile((HANDLE) bitstreamFilePtr, ddEncodeBitstreamLock1.bitstreamBufferPtr, ddEncodeBitstreamLock1.bitstreamSizeInBytes, NULL, &ddOverlapped1);
+				ddWriteOffset += ddEncodeBitstreamLock1.bitstreamSizeInBytes;
+				
+				ddState |= 2;
+			}
+			ddState &= ~4;
+		}
+	}
+	
+	if ((ddState & 8) > 0) { //Compute Wait Check
+		//consoleWriteLineFast("Compute Check", 13);
+		VkResult vkRes = vkGetFenceStatus(vulkanDevice, vulkanComputeFence);
+		if (vkRes == VK_SUCCESS) { //Can Now Encode and Release Desktop Duplication
+			
+			uint64_t currentTime = getCurrentTime();
+			ddComputeLatencySum += currentTime - ddComputeStartTime;
+			ddComputeCount++;
+			
+			HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
+			if (hrRes != S_OK) {
+				if (hrRes != DXGI_ERROR_INVALID_CALL) {
+					desktopDuplicationExtraInfo = (int) hrRes;
+					return ERROR_DESKDUPL_RELEASE_FAILED;
+				}
+			}
+			ddState |= 64 | 16; //Released Frame | Encode Start Wait
+			ddState &= ~8;
+		}
+		else if (vkRes == VK_NOT_READY) {
+			return 1;
+		}
+		else {
+			return ERROR_VULKAN_EXTRA_INFO;
+		}
+	}
+	
+	if ((ddState & 16) > 0) { //Encoding Start Wait Check
+		//consoleWriteLineFast("Encode Start Check", 18);
+		uint64_t writeCheck = ddState & 1;
+		if ((ddEncodeCount & 1) > 0) {
+			writeCheck = ddState & 2;
+		}
+		if (((ddState & 0b1100) == 0) && (writeCheck == 0)) {
+			ddEncodeStartTime = getCurrentTime();
+			
+			if (ddCounterIDR > 0) {
+			nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
+			ddCounterIDR--;
+			}
+			else {
+				nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
+				ddCounterIDR = ddCounterIDRreset;
+			}
+			if ((ddEncodeCount & 1) > 0) {
+				nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
+			}
+			else {
+				nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
+			}
+			
+			NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
+			if (nvEncRes != NV_ENC_SUCCESS) {
+				nvEncExtraInfo = nvEncRes;
+				return ERROR_NVENC_EXTRA_INFO;
+			}
+			BOOL setRes = SetEvent(ddEncodeEvent);
+			if (setRes == 0) {
+				return ERROR_GET_EXTRA_INFO;
+			}
+			
+			ddState |= 4;
+			ddState &= ~16;
+		}
+	}
+	
+	if ((ddState & 32) > 0) { //Compute Start Wait Check
+		//consoleWriteLineFast("Compute Start Check", 19);
+		if ((ddState & 0b11100) == 0) {
+			ddComputeStartTime = getCurrentTime();
+			vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, vulkanComputeFence);
+			
+			ddState |= 8;
+			ddState &= ~32;
+		}
+	}
+	//consoleBufferFlush();
 	
 	return 0;
 }
 
 
+int desktopDuplicationStop() {
+	uint64_t latency = ddAcquireLatencySum / ddAcquireCount;
+	latency /= microsecondDivider;
+	consoleWriteLineWithNumberFast("Avg Acquire Latency in us: ", 27, latency, NUM_FORMAT_UNSIGNED_INTEGER);
+	
+	latency = ddComputeLatencySum / ddComputeCount;
+	latency /= microsecondDivider;
+	consoleWriteLineWithNumberFast("Avg Compute Latency in us: ", 27, latency, NUM_FORMAT_UNSIGNED_INTEGER);
+	
+	latency = ddEncodeLatencySum / ddEncodeCount;
+	latency /= microsecondDivider;
+	consoleWriteLineWithNumberFast("Avg Encoder Latency in us: ", 27, latency, NUM_FORMAT_UNSIGNED_INTEGER);
+	
+	consoleWriteLineWithNumberFast("Repeated Frame Count: ", 22, ddRepeatCount, NUM_FORMAT_UNSIGNED_INTEGER);
+	consoleWriteLineWithNumberFast("Missed Timing Count:  ", 22, ddAcquireMissedTiming, NUM_FORMAT_UNSIGNED_INTEGER);
+	consoleWriteLineWithNumberFast("Misc Issue Count: ", 18, ddMiscIssues, NUM_FORMAT_UNSIGNED_INTEGER);
+	consoleWriteLineWithNumberFast("Avg Acquired Frames:  ", 22, ddAccumulatedFramesSum / ddAcquireCount, NUM_FORMAT_UNSIGNED_INTEGER);
+	
+	return 0;
+}
+
+/*
 int desktopDuplicationGetFrame() {
 	UINT64 mutexKey = 0; 
 	
@@ -3096,689 +3515,9 @@ int desktopDuplicationGetFrame() {
 	
 	return 0;
 }
+//*/
 
-static uint64_t ddLastPresentationTime = 0;
-static uint64_t ddCurrentPresentationTime = 0;
-static uint64_t ddCurrentFrame = 0;
-static uint64_t ddCurrentFrameState = 0;
-static uint64_t ddCounterIDRreset = 0;
-static uint64_t ddCounterIDR = 0;
-static uint64_t ddFrameIntervalTime = 0;
-static uint64_t ddFirstFrameStartTime = 0;
-static uint64_t ddFirstAcquireStartTime = 0;
-
-static VkWin32KeyedMutexAcquireReleaseInfoKHR ddTextureMutex = {};
-static VkSubmitInfo ddComputeSubmitInfo = {};
-static NV_ENC_LOCK_BITSTREAM ddEncodeBitstreamLock0 = {};
-static NV_ENC_LOCK_BITSTREAM ddEncodeBitstreamLock1 = {};
-
-static uint64_t ddRepeatFrame = 0;
-static uint64_t ddFrameNumInvalidStat = 0;
-
-static uint64_t ddLastAcquireTime = 0;
-static uint64_t ddLatencySum = 0;
-static uint64_t ddLatencyCount = 0;
-
-static uint64_t ddComputeLatencySum = 0;
-static uint64_t ddComputeLatencyCount = 0;
-static uint64_t ddComputeCheck = 0;
-
-static HANDLE ddThreadEndEvent = NULL;
-static HANDLE ddEncodeEvent = NULL;
-static HANDLE ddLockEvent = NULL;
-static HANDLE ddEncodeLockThreadHandle = NULL;
-
-static DWORD WINAPI ddEncodeLockThread(LPVOID lpParam) {
-	uint64_t bitTest = 0;
-	NV_ENC_LOCK_BITSTREAM* bitstreamToLock = &ddEncodeBitstreamLock0;
-	DWORD stopThread = WaitForSingleObject(ddThreadEndEvent, 0);
-	while (stopThread != 0) {
-		DWORD waitRes = WaitForSingleObject(ddEncodeEvent, INFINITE);
-		if (waitRes != 0) {
-			return waitRes;
-		}
-		NVENCSTATUS nvEncRes = nvEncFunList.nvEncLockBitstream(nvEncoder, bitstreamToLock);
-		if (nvEncRes != NV_ENC_SUCCESS) {
-			return nvEncRes;
-		}
-		BOOL setRes = SetEvent(ddLockEvent);
-		if (setRes == 0) {
-			return ERROR_GET_EXTRA_INFO;
-		}
-		bitTest ^= 1; //XOR with 1
-		if (bitTest == 0) {
-			bitstreamToLock = &ddEncodeBitstreamLock0;
-		}
-		else {
-			bitstreamToLock = &ddEncodeBitstreamLock1;
-		}
-		stopThread = WaitForSingleObject(ddThreadEndEvent, 0);
-	}	
-	
-	return stopThread;
-}
-
-
-static uint64_t ddWriteOffset = 0;
-static uint64_t ddWaitOnEncoding = 0;
-static HANDLE ddOverlapped0Event = NULL;
-static HANDLE ddOverlapped1Event = NULL;
-static OVERLAPPED ddOverlapped0 = {};
-static OVERLAPPED ddOverlapped1 = {};
-
-
-int desktopDuplicationSetFrameRate(uint64_t fps) {
-	if (desktopDuplicationState != DESKDUPL_STATE_STARTED) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
-	uint64_t acquireWaitTimeInMS = 2000 / fps; //Error thrown if not here (truncate desired here)
-	uint64_t currentTime = getCurrentTime();
-	uint64_t errorTime = getEndTimeFromMilliDiff(currentTime, acquireWaitTimeInMS);
-	
-	int error = desktopDuplicationGetNextDesktopImage(currentTime, errorTime, &ddLastPresentationTime);
-	if (error != 0) {
-		return error;
-	}
-	
-	//Make the Compute Setup and Run Once
-	uint64_t mutexKey = 0;
-	uint32_t timeout = 1;
-	
-	ddTextureMutex.sType = VK_STRUCTURE_TYPE_WIN32_KEYED_MUTEX_ACQUIRE_RELEASE_INFO_KHR;
-	ddTextureMutex.pNext = NULL;
-	ddTextureMutex.acquireCount = 1;
-	ddTextureMutex.pAcquireSyncs = &vulkanMemGPUimport;
-	ddTextureMutex.pAcquireKeys = &mutexKey;
-	ddTextureMutex.pAcquireTimeouts = &timeout;
-	ddTextureMutex.releaseCount = 1;
-	ddTextureMutex.pReleaseSyncs = &vulkanMemGPUimport;
-	ddTextureMutex.pReleaseKeys = &mutexKey;
-	
-	ddComputeSubmitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	ddComputeSubmitInfo.pNext = NULL;
-	ddComputeSubmitInfo.waitSemaphoreCount = 0;
-	ddComputeSubmitInfo.pWaitSemaphores = NULL;
-	ddComputeSubmitInfo.pWaitDstStageMask = NULL;
-	ddComputeSubmitInfo.commandBufferCount = 1;
-	ddComputeSubmitInfo.pCommandBuffers = &vulkanComputeCommandBuffers[4];
-	ddComputeSubmitInfo.signalSemaphoreCount = 0;//1;
-	ddComputeSubmitInfo.pSignalSemaphores = NULL;//&vulkanComputeSemaphore;
-	vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, VK_NULL_HANDLE);
-	
-	ddEncodeBitstreamLock0.version = NV_ENC_LOCK_BITSTREAM_VER;
-	ddEncodeBitstreamLock0.doNotWait = 0; //Has to be 0 for synchronous mode... tested and documented
-	ddEncodeBitstreamLock0.getRCStats = 0;
-	ddEncodeBitstreamLock0.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-	ddEncodeBitstreamLock0.sliceOffsets = NULL;
-	
-	ddEncodeBitstreamLock1.version = NV_ENC_LOCK_BITSTREAM_VER;
-	ddEncodeBitstreamLock1.doNotWait = 0;
-	ddEncodeBitstreamLock1.getRCStats = 0;
-	ddEncodeBitstreamLock1.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-	ddEncodeBitstreamLock1.sliceOffsets = NULL;
-	
-	//Setup time boundries
-	ddCurrentPresentationTime = 0;
-	ddCurrentFrame = 0;
-	ddCurrentFrameState = 0;
-	
-	nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA;
-	ddCounterIDRreset = fps * 3;
-	ddCounterIDR = ddCounterIDRreset;
-	ddFrameIntervalTime = timeCounterFrequency / fps;
-	ddFirstFrameStartTime = ddLastPresentationTime + (ddFrameIntervalTime >> 1);
-	ddFirstAcquireStartTime = getEndTimeFromMicroDiff(ddFirstFrameStartTime, 500);
-	//ddFirstComputeFailTime = ddFirstFrameStartTime + ((ddFrameIntervalTime * 9) / 8);
-	//ddFirstEncodeFailTime  = ddFirstFrameStartTime + ((ddFrameIntervalTime * 3) / 2);
-	
-	//consoleWriteLineWithNumberFast("Time 0: ", 8, getDiffTimeMilliseconds(ddFirstFrameStartTime, ddFirstFrameStartTime+ddFrameIntervalTime), NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("Time 1: ", 8, getDiffTimeMicroseconds(ddFirstFrameStartTime, ddFirstAcquireStartTime), NUM_FORMAT_UNSIGNED_INTEGER);
-	//currentTime = getCurrentTime();
-	//consoleWriteLineWithNumberFast("Time 3: ", 8, getDiffTimeMilliseconds(ddFirstFrameStartTime, currentTime), NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleBufferFlush();
-	
-	//Setup Encode Frame Values
-	ddRepeatFrame = 0;
-	ddWaitOnEncoding = 0;
-	ddFrameNumInvalidStat = 0;
-	ddLatencySum = 0;
-	ddLatencyCount = 0;
-	
-	ddComputeLatencySum = 0;
-	ddComputeLatencyCount = 0;
-	
-	ddThreadEndEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
-	if (ddThreadEndEvent == NULL) {
-		return ERROR_EVENT_NOT_CREATED;
-	}
-	ddEncodeEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
-	if (ddEncodeEvent == NULL) {
-		return ERROR_EVENT_NOT_CREATED;
-	}
-	ddLockEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
-	if (ddLockEvent == NULL) {
-		return ERROR_EVENT_NOT_CREATED;
-	}
-	
-	ddEncodeLockThreadHandle = CreateThread(NULL, 1, ddEncodeLockThread, NULL, 0, NULL);
-	if (ddEncodeLockThreadHandle == NULL) {
-		return ERROR_THREAD_NOT_CREATED;
-	}
-	
-	ddOverlapped0Event = CreateEventA(NULL, FALSE, FALSE, NULL);
-	if (ddOverlapped0Event == NULL) {
-		return ERROR_EVENT_NOT_CREATED;
-	}
-	ddOverlapped1Event = CreateEventA(NULL, FALSE, FALSE, NULL);
-	if (ddOverlapped1Event == NULL) {
-		return ERROR_EVENT_NOT_CREATED;
-	}
-	
-	ddOverlapped0.Internal = 0;
-	ddOverlapped0.InternalHigh = 0;
-	ddOverlapped0.Offset = 0xFFFFFFFF;
-	ddOverlapped0.OffsetHigh = 0xFFFFFFFF;
-	ddOverlapped0.Pointer = 0;
-	ddOverlapped0.hEvent = ddOverlapped0Event;
-	
-	ddOverlapped1.Internal = 0;
-	ddOverlapped1.InternalHigh = 0;
-	ddOverlapped1.Offset = 0xFFFFFFFF;
-	ddOverlapped1.OffsetHigh = 0xFFFFFFFF;
-	ddOverlapped1.Pointer = 0;
-	ddOverlapped1.hEvent = ddOverlapped1Event;
-	
-	
-	//Wait on the residule compute run and then release
-	vkQueueWaitIdle(vulkanComputeQueue);
-	HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-	if (hrRes != S_OK) {
-		if (hrRes != DXGI_ERROR_INVALID_CALL) {
-			desktopDuplicationExtraInfo = (int) hrRes;
-			return ERROR_DESKDUPL_RELEASE_FAILED;
-		}
-		//Frame already released
-	}
-	
-	currentTime = getCurrentTime();
-	//uint64_t diffTimeMS = getDiffTimeMilliseconds(ddFirstFrameStartTime, currentTime);
-	//consoleWriteLineWithNumberFast("Time 4: ", 8, diffTimeMS, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleBufferFlush();
-	
-	if (currentTime >= ddFirstFrameStartTime) {
-		ddFirstFrameStartTime = currentTime;
-		ddFirstAcquireStartTime = getEndTimeFromMicroDiff(currentTime, 500);
-	}
-	
-	desktopDuplicationState = DESKDUPL_STATE_RUNNING;
-	
-	return 0;
-}
-
-//Can Enter this Function Under a Variety of Conditions
-int desktopDuplicationEncodeNextFrame(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
-	if (desktopDuplicationState < DESKDUPL_STATE_RUNNING) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
-	if ((ddCurrentFrameState & 1) > 0) {
-		//Check on async file write here
-		//consoleWriteLineFast("Check Write File 0", 18);
-		DWORD waitRes = WaitForSingleObject(ddOverlapped0Event, 0);
-		if (waitRes == 0) { //Write Event Signaled
-			NVENCSTATUS nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff0.bitstreamBuffer);
-			if (nvEncRes != NV_ENC_SUCCESS) {
-				nvEncExtraInfo = nvEncRes;
-				return ERROR_NVENC_EXTRA_INFO;
-			}
-			(*frameWriteCount)++;
-			//consoleWriteLineFast("Wrote to File 0", 15);
-			
-			ddCurrentFrameState &= ~1;
-		}
-	}
-	if ((ddCurrentFrameState & 2) > 0) {
-		//Check on async file write here
-		DWORD waitRes = WaitForSingleObject(ddOverlapped1Event, 0);
-		if (waitRes == 0) { //Write Event Signaled
-			NVENCSTATUS nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff1.bitstreamBuffer);
-			if (nvEncRes != NV_ENC_SUCCESS) {
-				nvEncExtraInfo = nvEncRes;
-				return ERROR_NVENC_EXTRA_INFO;
-			}
-			(*frameWriteCount)++;
-			//consoleWriteLineFast("Wrote to File 1", 15);
-			
-			ddCurrentFrameState &= ~2;
-		}
-	}
-	
-	if ((ddCurrentFrameState & 4) > 0) {
-		//Lock Bitstream to "finish" encoding step
-		DWORD waitRes = WaitForSingleObject(ddLockEvent, 0);
-		if (waitRes == 0) { //Lock Event Signaled
-			//consoleWriteLineFast("Locked Bitstream", 16);
-			
-			uint64_t encodeFrameEndTime = getCurrentTime();
-			//uint64_t encodeFailTime = ddFirstEncodeFailTime + (frameNum * ddIntervalTime);
-			//if (encodeFrameEndTime > encodeFailTime) {
-			//	ddEncodeFailTimeStat++;
-			//}
-			ddLatencySum += encodeFrameEndTime - ddLastPresentationTime;
-			ddLatencyCount++;
-			
-			if ((ddCurrentFrame & 1) > 0) {
-				//consoleWriteLineFast("Write 0", 7);
-				
-				//Start Async Write Here
-				ddOverlapped0.Offset = (DWORD) (ddWriteOffset & 0xFFFFFFFF);
-				ddOverlapped0.OffsetHigh = (DWORD) (ddWriteOffset >> 32);
-				WriteFile((HANDLE) bitstreamFilePtr, ddEncodeBitstreamLock0.bitstreamBufferPtr, ddEncodeBitstreamLock0.bitstreamSizeInBytes, NULL, &ddOverlapped0);
-				ddWriteOffset += ddEncodeBitstreamLock0.bitstreamSizeInBytes;
-				
-				//consoleWriteLineWithNumberFast("Ptr: ", 5, (uint64_t) ddEncodeBitstreamLock0.bitstreamBufferPtr, NUM_FORMAT_FULL_HEXADECIMAL);
-				//consoleWriteLineWithNumberFast("Bytes: ", 7, (uint64_t) ddEncodeBitstreamLock0.bitstreamSizeInBytes, NUM_FORMAT_UNSIGNED_INTEGER);
-		
-				
-				ddCurrentFrameState |= 1;
-			}
-			else {
-				//consoleWriteLineFast("Write 1", 7);
-				
-				//Start Async Write Here
-				ddOverlapped1.Offset = (DWORD) (ddWriteOffset & 0xFFFFFFFF);
-				ddOverlapped1.OffsetHigh = (DWORD) (ddWriteOffset >> 32);
-				WriteFile((HANDLE) bitstreamFilePtr, ddEncodeBitstreamLock1.bitstreamBufferPtr, ddEncodeBitstreamLock1.bitstreamSizeInBytes, NULL, &ddOverlapped1);
-				ddWriteOffset += ddEncodeBitstreamLock1.bitstreamSizeInBytes;
-				
-				ddCurrentFrameState |= 2;
-			}
-			ddCurrentFrameState &= ~4;
-		}
-	}
-	else if ((ddCurrentFrameState & 8) > 0) { 	//Compute Frame Stuff	
-		ddComputeCheck++;
-		VkResult vkRes = vkGetFenceStatus(vulkanDevice, vulkanComputeFence);
-		if (vkRes == VK_SUCCESS) { //Can Now Encode and Release Desktop Duplication
-			
-			uint64_t computeFrameEndTime = getCurrentTime();
-			ddComputeLatencySum += computeFrameEndTime - ddLastAcquireTime;
-			ddComputeLatencyCount++;
-			
-			//consoleWriteLineFast("Frame Computed", 14);
-			//nvEncPicParams.frameIdx = frameNum;
-			NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
-			if (nvEncRes != NV_ENC_SUCCESS) {
-				nvEncExtraInfo = nvEncRes;
-				return ERROR_NVENC_EXTRA_INFO;
-			}
-			BOOL setRes = SetEvent(ddEncodeEvent);
-			if (setRes == 0) {
-				return ERROR_GET_EXTRA_INFO;
-			}
-			HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-			if (hrRes != S_OK) {
-				if (hrRes != DXGI_ERROR_INVALID_CALL) {
-					desktopDuplicationExtraInfo = (int) hrRes;
-					return ERROR_DESKDUPL_RELEASE_FAILED;
-				}
-			}
-			ddCurrentFrame++;
-			if (ddCounterIDR > 0) {
-				nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
-				ddCounterIDR--;
-			}
-			else {
-				nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
-				ddCounterIDR = ddCounterIDRreset;
-			}
-			if ((ddCurrentFrame & 1) > 0) {
-				nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-			}
-			else {
-				nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-			}
-			ddCurrentFrameState |= 4;
-			ddCurrentFrameState &= ~8;
-		}
-		else if (vkRes == VK_NOT_READY) {
-			return 1;
-		}
-		else {
-			return ERROR_VULKAN_EXTRA_INFO;
-		}
-	}
-	
-	uint64_t frameStartTime = ddFirstFrameStartTime + (ddCurrentFrame * ddFrameIntervalTime);
-	uint64_t frameEndTime = frameStartTime + ddFrameIntervalTime;
-	if ((ddCurrentFrameState & 16) > 0) { //Acquired Image But Need To Wait before Starting Compute or Encoding
-		ddWaitOnEncoding++;
-		//consoleWriteLineFast("Waiting On Encoding", 19);
-		if ((ddCurrentFrameState & 0xF) < 3) {
-			ddLastPresentationTime = ddCurrentPresentationTime;
-			if (ddLastPresentationTime < frameEndTime) { //Acquired Frame is Valid Needs to wait on 8
-				ddLastAcquireTime = getCurrentTime();
-				vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, vulkanComputeFence);
-				ddCurrentFrameState |= 8;
-			}
-			else { //Same Frame to re-encode
-				//Some Indicator that it will be the same frame
-				//consoleWriteLineFast("Repeat Frame 0", 14);
-				ddRepeatFrame++;
-				NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
-				if (nvEncRes != NV_ENC_SUCCESS) {
-					nvEncExtraInfo = nvEncRes;
-					return ERROR_NVENC_EXTRA_INFO;
-				}
-				BOOL setRes = SetEvent(ddEncodeEvent);
-				if (setRes == 0) {
-					return ERROR_GET_EXTRA_INFO;
-				}
-				ddCurrentFrame++;
-				if (ddCounterIDR > 0) {
-					nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
-					ddCounterIDR--;
-				}
-				else {
-					nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
-					ddCounterIDR = ddCounterIDRreset;
-				}
-				if ((ddCurrentFrame & 1) > 0) {
-					nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-				}
-				else {
-					nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-				}
-				ddCurrentFrameState |= 4;
-				
-				HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-				if (hrRes != S_OK) {
-					if (hrRes != DXGI_ERROR_INVALID_CALL) {
-						desktopDuplicationExtraInfo = (int) hrRes;
-						return ERROR_DESKDUPL_RELEASE_FAILED;
-					}
-				}
-			}
-			ddCurrentFrameState &= ~16;
-		}
-	}
-	else {
-		//Wait for release time
-		uint64_t acquireStartTime = ddFirstAcquireStartTime + (ddCurrentFrame * ddFrameIntervalTime);
-		uint64_t acquireEndTime = acquireStartTime + ddFrameIntervalTime;
-		uint64_t currentTime = getCurrentTime();
-		if (currentTime < acquireStartTime) {
-			//ddReleaseFailTimeStat++;
-			if (ddCurrentFrameState != 0) {
-				return 0;
-			}
-			else {
-				return getDiffTimeMilliseconds(currentTime, acquireStartTime);
-			}
-		}
-		else if (currentTime >= acquireEndTime) {
-			//Do different things based on a variety of states
-			ddFrameNumInvalidStat++;
-			//uint64_t validFrameNum = (currentTime - ddFirstFrameStartTime) / ddFrameIntervalTime;
-			//validFrameNum += 1;
-			//consoleWriteLineWithNumberFast("Invalid Frame Number: ", 23, ddCurrentFrame, NUM_FORMAT_UNSIGNED_INTEGER);
-			//consoleWriteLineWithNumberFast("Invalid Frame Number: ", 23, validFrameNum, NUM_FORMAT_UNSIGNED_INTEGER);
-		}
-		
-		//Frame rate cannot be more than 250 so I can always do 1ms wait for first try
-		if (ddCurrentPresentationTime < frameStartTime) {
-			//consoleWriteLineWithNumberFast("Acquire Try: ", 13, getDiffTimeMilliseconds(ddFirstFrameStartTime, currentTime), NUM_FORMAT_UNSIGNED_INTEGER);
-			DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
-			IDXGIResource* desktopResourcePtr = NULL;
-			HRESULT hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, 1, &frameInfo, &desktopResourcePtr);
-			if (hrRes == S_OK) { //Acquired Something (Might just be mouse stuff)
-				ddCurrentPresentationTime = (uint64_t) frameInfo.LastPresentTime.QuadPart;
-				//currentTime = getCurrentTime();
-				//if (ddCurrentPresentationTime > currentTime) {
-				//	ddCurrentPresentationTime = currentTime;
-				//	consoleWriteLineFast("Presentation Time Issue", 10);
-				//}
-				if (ddCurrentPresentationTime >= frameStartTime) { //Actually acquired image and it is in the expected time
-					if (ddCurrentFrameState < 3) {
-						//consoleWriteLineWithNumberFast("Frame Acquired: ", 16, getDiffTimeMilliseconds(ddFirstFrameStartTime, ddCurrentPresentationTime), NUM_FORMAT_UNSIGNED_INTEGER);
-						ddLastPresentationTime = ddCurrentPresentationTime;
-						if (ddLastPresentationTime < frameEndTime) { //Acquired Frame is Valid Needs to wait on 8
-							ddLastAcquireTime = getCurrentTime();
-							vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, vulkanComputeFence);
-							ddCurrentFrameState |= 8;
-						}
-						else { //Same Frame to re-encode
-							//Some Indicator that it will be the same frame
-							//consoleWriteLineFast("Repeat Frame 1", 14);
-							ddRepeatFrame++;
-							NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
-							if (nvEncRes != NV_ENC_SUCCESS) {
-								nvEncExtraInfo = nvEncRes;
-								return ERROR_NVENC_EXTRA_INFO;
-							}
-							BOOL setRes = SetEvent(ddEncodeEvent);
-							if (setRes == 0) {
-								return ERROR_GET_EXTRA_INFO;
-							}
-							ddCurrentFrame++;
-							if (ddCounterIDR > 0) {
-								nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
-								ddCounterIDR--;
-							}
-							else {
-								nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
-								ddCounterIDR = ddCounterIDRreset;
-							}
-							if ((ddCurrentFrame & 1) > 0) {
-								nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-							}
-							else {
-								nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-							}
-							ddCurrentFrameState |= 4;
-							
-							hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-							if (hrRes != S_OK) {
-								if (hrRes != DXGI_ERROR_INVALID_CALL) {
-									desktopDuplicationExtraInfo = (int) hrRes;
-									return ERROR_DESKDUPL_RELEASE_FAILED;
-								}
-							}
-						}
-					}
-					else {
-						ddCurrentFrameState |= 16;
-					}
-				}
-				else { //probably acquired mouse change info... need to release frame
-					hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-					if (hrRes != S_OK) {
-						if (hrRes != DXGI_ERROR_INVALID_CALL) {
-							desktopDuplicationExtraInfo = (int) hrRes;
-							return ERROR_DESKDUPL_RELEASE_FAILED;
-						}
-					}
-					
-					currentTime = getCurrentTime();
-					if (currentTime < frameEndTime) {
-						return getDiffTimeMilliseconds(currentTime, frameEndTime);
-					}
-					else { //Re-encode previous Frame If Space
-						if (ddCurrentFrameState < 3) {
-							//Some Indicator that it will be the same frame
-							//consoleWriteLineFast("Repeat Frame 2", 14);
-							ddRepeatFrame++;
-							NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
-							if (nvEncRes != NV_ENC_SUCCESS) {
-								nvEncExtraInfo = nvEncRes;
-								return ERROR_NVENC_EXTRA_INFO;
-							}
-							BOOL setRes = SetEvent(ddEncodeEvent);
-							if (setRes == 0) {
-								return ERROR_GET_EXTRA_INFO;
-							}
-							ddCurrentFrame++;
-							if (ddCounterIDR > 0) {
-								nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
-								ddCounterIDR--;
-							}
-							else {
-								nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
-								ddCounterIDR = ddCounterIDRreset;
-							}
-							if ((ddCurrentFrame & 1) > 0) {
-								nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-							}
-							else {
-								nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-							}
-							ddCurrentFrameState |= 4;
-						}
-						else {
-							ddCurrentFrameState |= 16;
-						}
-					}
-				}
-			}
-			else if (hrRes == DXGI_ERROR_WAIT_TIMEOUT) { //Failed to acquire next frame due to timeout
-				currentTime = getCurrentTime();
-				if (currentTime < frameEndTime) {
-					//return 0;
-					return getDiffTimeMilliseconds(currentTime, frameEndTime);
-				}
-				else { //Re-encode previous Frame If Space
-					if (ddCurrentFrameState < 3) {
-						ddLastPresentationTime = currentTime;
-						//Some Indicator that it will be the same frame
-						//consoleWriteLineWithNumberFast("Repeat Frame 3: ", 16, getDiffTimeMilliseconds(ddFirstFrameStartTime, currentTime), NUM_FORMAT_UNSIGNED_INTEGER);
-						ddRepeatFrame++;
-						NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
-						if (nvEncRes != NV_ENC_SUCCESS) {
-							nvEncExtraInfo = nvEncRes;
-							return ERROR_NVENC_EXTRA_INFO;
-						}
-						BOOL setRes = SetEvent(ddEncodeEvent);
-						if (setRes == 0) {
-							return ERROR_GET_EXTRA_INFO;
-						}
-						ddCurrentFrame++;
-						if (ddCounterIDR > 0) {
-							nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
-							ddCounterIDR--;
-						}
-						else {
-							nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
-							ddCounterIDR = ddCounterIDRreset;
-						}
-						if ((ddCurrentFrame & 1) > 0) {
-							nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-						}
-						else {
-							nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-						}
-						ddCurrentFrameState |= 4;
-					}
-					else {
-						ddCurrentFrameState |= 16;
-					}
-				}
-			}
-			else {
-				desktopDuplicationExtraInfo = (int) hrRes;
-				return ERROR_DESKDUPL_ACQUIRE_FAILED;
-			}
-		}
-		else if (ddCurrentPresentationTime < frameEndTime) {
-			if (ddCurrentFrameState < 3) {
-				consoleWriteLineFast("Reusing Acquired", 15);
-				ddLastPresentationTime = ddCurrentPresentationTime;
-				if (ddLastPresentationTime < frameEndTime) { //Acquired Frame is Valid Needs to wait on 8
-					ddLastAcquireTime = getCurrentTime();
-					vkQueueSubmit(vulkanComputeQueue, 1, &ddComputeSubmitInfo, vulkanComputeFence);
-					ddCurrentFrameState |= 8;
-				}
-				else { //Same Frame to re-encode
-					//Some Indicator that it will be the same frame
-					//consoleWriteLineFast("Repeat Frame 4", 14);
-					ddRepeatFrame++;
-					NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
-					if (nvEncRes != NV_ENC_SUCCESS) {
-						nvEncExtraInfo = nvEncRes;
-						return ERROR_NVENC_EXTRA_INFO;
-					}
-					BOOL setRes = SetEvent(ddEncodeEvent);
-					if (setRes == 0) {
-						return ERROR_GET_EXTRA_INFO;
-					}
-					ddCurrentFrame++;
-					if (ddCounterIDR > 0) {
-						nvEncPicParams.encodePicFlags = 0; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_P;
-						ddCounterIDR--;
-					}
-					else {
-						nvEncPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEINTRA; //nvEncPicParams.pictureType = NV_ENC_PIC_TYPE_IDR; //NV_ENC_PIC_TYPE_I;
-						ddCounterIDR = ddCounterIDRreset;
-					}
-					if ((ddCurrentFrame & 1) > 0) {
-						nvEncPicParams.outputBitstream = nvEncBitstreamBuff1.bitstreamBuffer;
-					}
-					else {
-						nvEncPicParams.outputBitstream = nvEncBitstreamBuff0.bitstreamBuffer;
-					}
-					ddCurrentFrameState |= 4;
-					
-					HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
-					if (hrRes != S_OK) {
-						if (hrRes != DXGI_ERROR_INVALID_CALL) {
-							desktopDuplicationExtraInfo = (int) hrRes;
-							return ERROR_DESKDUPL_RELEASE_FAILED;
-						}
-					}
-				}
-			}
-			else {
-				ddCurrentFrameState |= 16;
-			}
-		}
-		else {
-			consoleWriteLineFast("Sync Issue", 10);
-			currentTime = getCurrentTime();
-			consoleWriteLineWithNumberFast("PT: ", 4, getDiffTimeMicroseconds(frameEndTime, ddCurrentPresentationTime), NUM_FORMAT_UNSIGNED_INTEGER);
-			consoleWriteLineWithNumberFast("CT: ", 4, currentTime, NUM_FORMAT_UNSIGNED_INTEGER);
-			return ERROR_RARE_TIMING_DESYNC;
-		}
-		
-	}
-	
-	
-	return 0;
-}
-
-int desktopDuplicationPrintEncodingStats() {
-	//Insert State Check(s) Here!
-	
-	consoleWriteLineWithNumberFast("Repeated Frame Count: ", 22, ddRepeatFrame, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("Wait On Encoding: ", 18, ddWaitOnEncoding, NUM_FORMAT_UNSIGNED_INTEGER);
-	consoleWriteLineWithNumberFast("Frame Invalid Stat: ", 20, ddFrameNumInvalidStat, NUM_FORMAT_UNSIGNED_INTEGER);
-	
-	
-	uint64_t latency = ddLatencySum / ddLatencyCount;
-	latency /= microsecondDivider;
-	consoleWriteLineWithNumberFast("Average Latency in us: ", 23, latency, NUM_FORMAT_UNSIGNED_INTEGER);
-	
-	latency = ddComputeLatencySum / ddComputeLatencyCount;
-	latency /= microsecondDivider;
-	consoleWriteLineWithNumberFast("Avg Compute Latency us: ", 24, latency, NUM_FORMAT_UNSIGNED_INTEGER);
-	
-	//uint64_t checks = ddComputeCheck / ddComputeLatencyCount;
-	//consoleWriteLineWithNumberFast("Compute Avg Checks: ", 20, checks, NUM_FORMAT_UNSIGNED_INTEGER);
-	
-	return 0;
-}
-
-
-int desktopDuplicationStop() {
+int desktopDuplicationClean() {
 	if (desktopDuplicationState == DESKDUPL_STATE_UNDEFINED) {
 		return 0;
 	}

@@ -724,7 +724,7 @@ void startP() {
 	
 	consoleControl(CON_NEW_LINE, 0);
 	consolePrintLine(22);
-	consolePrintLine(23);
+	//consolePrintLine(23);
 	
 	//consolePrintLine(24);
 	//consoleBufferFlush();
@@ -737,7 +737,7 @@ void startP() {
 	uint32_t* shaderData = (uint32_t*) shader_data;
 	//consolePrintLineWithNumber(24, (uint64_t) shaderData[0], NUM_FORMAT_PARTIAL_HEXADECIMAL);
 	uint32_t* lutBufferPtr = NULL;
-	error = desktopDuplicationStart(shaderSize, shaderData, (void**) &lutBufferPtr);
+	error = desktopDuplicationSetup(shaderSize, shaderData, (void**) &lutBufferPtr);
 	EXIT_ON_ERROR(error);
 	
 	populateSRGBtoXVYCbCrLUT(lutBufferPtr, 1, 1);
@@ -824,13 +824,15 @@ void startP() {
 	uint64_t fps = 60;
 	uint64_t recordSeconds = 60;
 	
-	int ddError = desktopDuplicationSetFrameRate(fps);
+	int ddError = desktopDuplicationStart(fps);
 	EXIT_ON_ERROR(ddError);
+	consoleBufferFlush();
+	
 	uint64_t numOfFrames = fps * recordSeconds;
 	uint64_t numWrittenFrames = 0;
 	uint64_t sleepTotal = 0;
 	while (numWrittenFrames < numOfFrames) {
-		ddError = desktopDuplicationEncodeNextFrame(h265File, &numWrittenFrames);
+		ddError = desktopDuplicationRun(h265File, &numWrittenFrames);
 		if (ddError > 1000) {
 			break;
 		}
@@ -840,7 +842,7 @@ void startP() {
 			sleepTotal++;
 		}
 	}
-	desktopDuplicationPrintEncodingStats();
+	desktopDuplicationStop();
 	//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, sleepTotal, NUM_FORMAT_UNSIGNED_INTEGER);
 	//*/
 	
@@ -861,7 +863,7 @@ void startP() {
 	}
 	
 	//Stop Desktop Duplication
-	desktopDuplicationStop();
+	//desktopDuplicationStop();
 	
 	consoleBufferFlush();
 	uint64_t stopTime = getCurrentTime();
