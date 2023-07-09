@@ -26,7 +26,7 @@
 2. Run the executable and a console window should appear with basic information
 3. Press Enter to start the record when prompted
 4. After the 60 second period a "bitstream.h265" file will be created in the same folder as the executable
-5. *Optionally use ffmpeg to convert the bitstream into a lossy viewable video by using a command like:
+5. *Optionally use [ffmpeg](https://ffmpeg.org/) to convert the bitstream into a lossy viewable video by using a command like:
 
  ```ffmpeg -i bitstream.h265 -c:v libx264 -preset veryfast -crf 22 -pix_fmt yuv420p -color_range 2 lossyVersion.mp4```
 
