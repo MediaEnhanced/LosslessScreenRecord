@@ -20,101 +20,241 @@
 //SOFTWARE.
 
 
-//Media Enhanced Windows Compatibility Implementation for Console-Based Programs
-//Uses UTF-8 for the console but converts to UTF-16
+//Media Enhanced Windows Compatibility Implementation
+//All input strings are in UTF-8 but converts to UTF-16
 //when neccessary to communicate with the win32 API
-//Error Checking is a mixed bag... especially for the non-fast functions
-#include "compatibility.h" 
-#include "math.h" //Includes the math function definitions needed for gcd
-
-// Compatibility State Codes:
-#define COMPATIBILITY_STATE_UNDEFINED 0
-#define COMPATIBILITY_STATE_BARE 1
-#define COMPATIBILITY_STATE_FULL 2
-static uint64_t compatibilityState = COMPATIBILITY_STATE_UNDEFINED;
+//Complete error checking is still a work in progress
+#include "compatibility.h" //Includes stdint.h
+#include "math.h" //Includes the math function definitions (needed for gcd)
 
 #define UNICODE //defined before any includes, dictates that Windows function defaults will work with Unicode UTF-16(LE) encoded strings
 #define _UNICODE //similar definition
-#define WIN32_LEAN_AND_MEAN //Excludes several unnecessary includes when using windows.h
-#include <windows.h> //Includes win32 functions and helper macros (uses UNICODE define)
+#define WIN32_LEAN_AND_MEAN //excludes several unnecessary includes when using windows.h
+#include <windows.h> //Includes win32 functions and helper macros (uses the above defines)
 
-#define INITGUID //So there is no need to link to libdxguid.a (smaller .rdata section size too)
-#include <dxgi1_6.h> //Needed to get adapters (GPU devices)
-#include <d3d11.h>   //Windows DirectX 11: Version 11.1 is needed for Desktop Duplication
-
-
-#define VK_USE_PLATFORM_WIN32_KHR //Define Vulkan To Use 
-#include "include/vulkan/vulkan.h"
-
-#include "include/cuda/cuda.h"
-#include "include/nvEncodeAPI.h"
-
-#include <winsock2.h> //Windows Networking Header
-#include <ws2tcpip.h> //Needed for additional windows networking functions and definitions (IPv6)
-#include <mswsock.h> //Needed for (better) recv and send socket operations and some socket option defines
-
-#include <Commdlg.h> //Includes win32 command dialog "pop-up" boxes used for choosing an input file
-
-//#include <tchar.h> //needed for _tcscat_s
-//#include <shobjidl.h>
-
-#define RETURN_ON_ERROR(error) ({if (error != 0) { return error; }})
-
-//Basic Local version of the wcscpy CRT library function
-static WCHAR* wcscpyBasic(WCHAR* dest, const WCHAR* src) {
-	WCHAR* destCpy = dest;
-	WCHAR value;
-	do {
-		value = *src;
-		*destCpy = value;
-		src++;
-		destCpy++;
-	} while(value != 0);
-	return dest;
+void compatibilityExit(int returnError) {	
+	ExitProcess((DWORD) returnError);
 }
+
+void compatibilityGetExtraError(int* error) {
+	*error = (int) GetLastError();
+}
+
+
+//Time State and Functions:
+static uint64_t timeCounterFrequency = 0;
+static uint64_t timeSecondDivider = 0;
+static uint64_t timeMillisecondDivider = 0;
+static uint64_t timeMicrosecondDivider = 0;
+
+int timeFunctionSetup() {
+	LARGE_INTEGER performanceCounter;
+	BOOL result = QueryPerformanceFrequency(&performanceCounter);
+	if (result == 0) {
+		return ERROR_TIMER_BAD; //Will probably NEVER happen
+	}
+	timeCounterFrequency = (uint64_t) performanceCounter.QuadPart;
+	timeSecondDivider = timeCounterFrequency / SECOND_FREQUENCY;
+	timeMillisecondDivider = timeCounterFrequency / MILLISECOND_FREQUENCY;
+	timeMicrosecondDivider = timeCounterFrequency / MICROSECOND_FREQUENCY;
+	
+	return 0;
+}
+
+uint64_t getCurrentTime() {
+	LARGE_INTEGER performanceCounter;
+	QueryPerformanceCounter(&performanceCounter);
+	return (uint64_t) performanceCounter.QuadPart;
+}
+
+uint64_t getDiffTimeMicroseconds(uint64_t startTime, uint64_t endTime) {
+	return ((endTime - startTime) / timeMicrosecondDivider);
+}
+
+uint64_t getDiffTimeMilliseconds(uint64_t startTime, uint64_t endTime) {
+	return ((endTime - startTime) / timeMillisecondDivider);
+}
+
+uint64_t getDiffTimeSeconds(uint64_t startTime, uint64_t endTime) {
+	return ((endTime - startTime) / timeSecondDivider);
+}
+
+uint64_t getEndTimeFromMicroDiff(uint64_t startTime, uint64_t usDiff) {
+	return (startTime + (usDiff * timeMicrosecondDivider));
+}
+
+uint64_t getEndTimeFromMilliDiff(uint64_t startTime, uint64_t msDiff) {
+	return (startTime + (msDiff * timeMillisecondDivider));
+}
+
+uint64_t getTimestampNTP() {
+	uint64_t nanoseconds100 = 0;
+	FILETIME* sysTimeUTC = (FILETIME*) &nanoseconds100;
+	
+	GetSystemTimePreciseAsFileTime(sysTimeUTC);
+	
+	uint64_t seconds = nanoseconds100 / 10000000;
+	uint64_t secondFraction = nanoseconds100 - (seconds * 10000000);
+	
+	seconds -= 9435484800; //Seconds Between Jan 1st 1601 and Jan 1st 1900
+	seconds <<= 32;
+	
+	secondFraction <<= 32;
+	secondFraction /= 10000000;
+	secondFraction &= 0xFFFFFFFF;
+	
+	return seconds | secondFraction;
+}
+
+uint64_t getTimestamp100us() {
+	uint64_t nanoseconds100 = 0;
+	FILETIME* sysTimeUTC = (FILETIME*) &nanoseconds100;
+	
+	GetSystemTimePreciseAsFileTime(sysTimeUTC);
+	
+	nanoseconds100 -= (9435484800 * 10000000);
+	uint64_t us100  = nanoseconds100 / 1000;
+	
+	return us100;
+}
+
+
+// Memory Operations:
+static uint64_t largePageSupport = 0;
+
+int memoryLargePageSetup() { //Try to allow the creation of large page memory
+	/*
+	//To be implemented using: https://learn.microsoft.com/en-us/windows/win32/memory/large-page-support
+	//HANDLE tokenHandle GetCurrentProcessToken();
+	//BOOL adjustTokenResult = AdjustTokenPrivileges(tokenHandle, FALSE, 
+	
+	HANDLE hToken = NULL;
+	TOKEN_PRIVILEGES tp;
+
+	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
+		//printf("OpenProcessToken #2 failed. GetLastError returned: %ld\n", GetLastError());
+		return -20;
+	}
+
+	tp.PrivilegeCount = 1;
+	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	if (!LookupPrivilegeValue(NULL, SE_LOCK_MEMORY_NAME, &tp.Privileges[0].Luid)) {
+		//printf("LookupPrivilegeValue failed. GetLastError returned: %ld\n", GetLastError());
+		return -21;
+	}
+
+	BOOL adjResult = AdjustTokenPrivileges(hToken, FALSE, &tp, 0, (PTOKEN_PRIVILEGES)NULL, 0);
+	DWORD lastError = GetLastError();
+
+	if (!adjResult || (lastError != ERROR_SUCCESS)) {
+		//printf("AdjustTokenPrivileges failed. GetLastError returned: %ld\n", lastError);
+		return -22;
+	}
+	
+	CloseHandle(hToken);
+	
+	largePageSupport = 1;
+	//*/
+	
+	largePageSupport = 0;
+	return ERROR_LARGE_PAGE_NOT_ALLOWED;
+}
+
+int memoryAllocateOnePage(void** memoryPtr, uint64_t* memoryBytes) {	
+	SYSTEM_INFO sSysInfo;
+	GetSystemInfo(&sSysInfo);
+	DWORD defaultPageSize = sSysInfo.dwPageSize; //Expecting to be set to 4KB (1024 * 4 bytes) for x64 Architecture
+	
+	*memoryBytes = (uint64_t) defaultPageSize;
+	*memoryPtr = VirtualAlloc(NULL, (SIZE_T) defaultPageSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+	if (*memoryPtr == NULL) {
+		return ERROR_MEMORY_CANNOT_ALLOC;
+	}
+	return 0;
+}
+
+int memoryAllocate(void** memoryPtr, uint64_t memoryBytes, uint64_t largePage) {
+	DWORD allocationType = MEM_COMMIT | MEM_RESERVE;
+	if (largePage > 0) {
+		if (largePageSupport == 0) {
+			return ERROR_LARGE_PAGE_NOT_ALLOWED;
+		}
+		SIZE_T largePageMinBytes = GetLargePageMinimum();
+		if ((memoryBytes % largePageMinBytes) != 0) {
+			return ERROR_LARGE_PAGE_NOT_ENOUGH_BYTES;
+		}
+		allocationType |= MEM_LARGE_PAGES;
+	}
+	*memoryPtr = VirtualAlloc(NULL, (SIZE_T) memoryBytes, allocationType, PAGE_READWRITE);
+	if (*memoryPtr == NULL) {
+		return ERROR_MEMORY_CANNOT_ALLOC;
+	}
+	return 0;
+}
+
+int memoryGetSize(void* memoryPtr, uint64_t* memoryBytes) {
+	MEMORY_BASIC_INFORMATION memInfo;
+	SIZE_T infoBytes = VirtualQuery(memoryPtr, &memInfo, sizeof(MEMORY_BASIC_INFORMATION));
+	if (infoBytes != sizeof(MEMORY_BASIC_INFORMATION)) {
+		return ERROR_MEMORY_CANNOT_GET_SIZE;
+	}
+	*memoryBytes = (uint64_t) memInfo.RegionSize;
+	return 0;
+}
+
+int memoryDeallocate(void** memoryPtr) {
+	BOOL freeResult = VirtualFree(*memoryPtr, 0, MEM_RELEASE);
+	if (freeResult == 0) {
+		return ERROR_MEMORY_CANNOT_FREE;
+	}
+	*memoryPtr = NULL;
+	return 0;
+}
+
+
+
+// Console State Codes:
+#define CONSOLE_STATE_UNDEFINED 0
+#define CONSOLE_STATE_MINIMUM 1
+#define CONSOLE_STATE_FULL 2
+static uint64_t consoleState = CONSOLE_STATE_UNDEFINED;
 
 static HANDLE consoleOut = NULL;
 static HANDLE consoleIn = NULL;
-static UINT originalConsoleOutCP = 0;
-static UINT originalConsoleCP = 0;
-static DWORD defaultPageSize = 0; //Expecting to be set to 4KB (1024 * 4 bytes)
-static uint64_t timeCounterFrequency = 0;
-static uint64_t secondDivider = 0;
-static uint64_t millisecondDivider = 0;
-static uint64_t microsecondDivider = 0;
+static UINT consoleOutCPOriginal = 0;
+static UINT consoleCPOriginal = 0;
+static DWORD consoleOutModeOriginal = 0;
+static DWORD consoleModeOriginal = 0;
 
-static void startBareCompatibility() { //Does no error checking... assumes that the bare minimum will always be completed successfully
-	if (compatibilityState >= COMPATIBILITY_STATE_BARE) {
+void consoleSetupMinimum() {
+	if (consoleState > CONSOLE_STATE_UNDEFINED) {
 		return;
 	}
 	
 	consoleOut = GetStdHandle(STD_OUTPUT_HANDLE);
 	consoleIn = GetStdHandle(STD_INPUT_HANDLE);
 	
-	originalConsoleOutCP = GetConsoleOutputCP();
-	originalConsoleCP = GetConsoleCP();
+	consoleOutCPOriginal = GetConsoleOutputCP();
+	consoleCPOriginal = GetConsoleCP();
 	
 	SetConsoleOutputCP(CP_UTF8);
 	SetConsoleCP(CP_UTF8);
 	
-	SYSTEM_INFO sSysInfo;
-	GetSystemInfo(&sSysInfo);
-	defaultPageSize = sSysInfo.dwPageSize;
+	GetConsoleMode(consoleOut, &consoleOutModeOriginal);
+	GetConsoleMode(consoleIn, &consoleModeOriginal);
 	
-	LARGE_INTEGER performanceCounter;
-	BOOL result = QueryPerformanceFrequency(&performanceCounter);
-	if (result != 0) {
-		timeCounterFrequency = (uint64_t) performanceCounter.QuadPart;
-	}
-	secondDivider = timeCounterFrequency / SECOND_FREQUENCY;
-	millisecondDivider = timeCounterFrequency / MILLISECOND_FREQUENCY;
-	microsecondDivider = timeCounterFrequency / MICROSECOND_FREQUENCY;
+	DWORD consoleOutMode = consoleOutModeOriginal | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+	DWORD consoleMode = ENABLE_PROCESSED_INPUT;//consoleModeOriginal & (~ENABLE_ECHO_INPUT);
 	
-	compatibilityState = COMPATIBILITY_STATE_BARE;
+	SetConsoleMode(consoleOut, consoleOutMode);
+	SetConsoleMode(consoleIn, consoleMode);
+	
+	consoleState = CONSOLE_STATE_MINIMUM;
 }
 
-void consoleWriteLineDirect(char* strUTF8, uint64_t strBytes) {
-	if (compatibilityState < COMPATIBILITY_STATE_BARE) {
+void consoleWriteDirectLine(char* strUTF8, uint64_t strBytes) {
+	if (consoleState < CONSOLE_STATE_MINIMUM) {
 		return;
 	}
 	
@@ -123,8 +263,8 @@ void consoleWriteLineDirect(char* strUTF8, uint64_t strBytes) {
 	WriteConsoleA(consoleOut, &newLine, 1, NULL, NULL);
 }
 
-void consoleWriteLineWithNumberDirect(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat) {
-	if (compatibilityState < COMPATIBILITY_STATE_BARE) {
+void consoleWriteDirectLineWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat) {
+	if (consoleState < CONSOLE_STATE_MINIMUM) {
 		return;
 	}
 	
@@ -157,16 +297,8 @@ void consoleWriteLineWithNumberDirect(char* strUTF8, uint64_t strBytes, uint64_t
 	WriteConsoleA(consoleOut, strBuffer, numCharacters, NULL, NULL);
 }
 
-void getCompatibilityExtraError(int* error) {
-	if (compatibilityState < COMPATIBILITY_STATE_BARE) {
-		return;
-	}
-	
-	*error = (int) GetLastError();
-}
-
 void consoleWaitForEnter() {
-	if (compatibilityState < COMPATIBILITY_STATE_BARE) {
+	if (consoleState < CONSOLE_STATE_UNDEFINED) {
 		return;
 	}
 	
@@ -192,79 +324,54 @@ void consoleWaitForEnter() {
 	}
 }
 
-
-uint64_t getCurrentTime() {
-	LARGE_INTEGER performanceCounter;
-	QueryPerformanceCounter(&performanceCounter);
-	return (uint64_t) performanceCounter.QuadPart;
+//Basic Local version of the wcscpy CRT library function
+static WCHAR* wcscpyBasic(WCHAR* dest, const WCHAR* src) {
+	WCHAR* destCpy = dest;
+	WCHAR value;
+	do {
+		value = *src;
+		*destCpy = value;
+		src++;
+		destCpy++;
+	} while(value != 0);
+	return dest;
 }
 
-void incDiffTime(uint64_t* countTime, uint64_t startTime, uint64_t endTime) {
-	*countTime += (endTime - startTime);
-}
+// Console (With Buffer) State and Functions:
+const WCHAR consoleFontDesiredName[] = L"Courier New";
+static CONSOLE_FONT_INFOEX consoleFontOrignal = {0};
+static COORD consoleScreenBufferSizeOriginal = {0, 0};
+static SMALL_RECT consoleScreenBufferCoordinatesOriginal = {0, 0, 0, 0};
 
-uint64_t getDiffTimeMicroseconds(uint64_t startTime, uint64_t endTime) {
-	return ((endTime - startTime) / microsecondDivider);
-}
+#define CONSOLE_FLUSH_MS 1
+static void* consoleBuffer = NULL;
+static char* consoleBufferPos = NULL;
+static uint64_t consoleByteSize = 0;
+static uint64_t consoleBytesRemaining = 0;
+static uint64_t consoleLastFlushTime = 0;
 
-uint64_t getDiffTimeMilliseconds(uint64_t startTime, uint64_t endTime) {
-	return ((endTime - startTime) / millisecondDivider);
-}
-
-uint64_t getDiffTimeSeconds(uint64_t startTime, uint64_t endTime) {
-	return ((endTime - startTime) / secondDivider);
-}
-
-uint64_t getEndTimeFromMicroDiff(uint64_t startTime, uint64_t usDiff) {
-	return (startTime + (usDiff * microsecondDivider));
-}
-
-uint64_t getEndTimeFromMilliDiff(uint64_t startTime, uint64_t msDiff) {
-	return (startTime + (msDiff * millisecondDivider));
-}
-
-
-const WCHAR desiredConsoleFont[] = L"Courier New";
-static CONSOLE_FONT_INFOEX originalConsoleFont = {0};
-static COORD originalConsoleScreenBufferSize = {0, 0};
-static SMALL_RECT originalConsoleScreenBufferCoordinates = {0, 0, 0, 0};
-static DWORD originalConsoleOutMode = 0;
-static DWORD originalConsoleMode = 0;
-
-static char* cmdCurrentArgument = NULL;
-static uint64_t largePageSupport = 0;
-
-int startFullCompatibility() { //add more error checking...
-	if (compatibilityState >= COMPATIBILITY_STATE_FULL) {
-		return ERROR_ALREADY_STARTED;
+int consoleSetupFull() {
+	if (consoleState != CONSOLE_STATE_MINIMUM) {
+		return ERROR_CONSOLE_WRONG_STATE;
 	}
 	
-	startBareCompatibility(); //Check some set values from this and throw errors if neccessary
-	if (defaultPageSize != 4096) {
-		return ERROR_INVALID_PAGE_SIZE;
-	}
-	
-	originalConsoleFont.cbSize = sizeof(CONSOLE_FONT_INFOEX);
-	BOOL res = GetCurrentConsoleFontEx(consoleOut, FALSE, &originalConsoleFont);
+	consoleFontOrignal.cbSize = sizeof(CONSOLE_FONT_INFOEX);
+	BOOL res = GetCurrentConsoleFontEx(consoleOut, FALSE, &consoleFontOrignal);
 	if (res == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_CONSOLE_FULL_SETUP;
 	}
 	
 	CONSOLE_SCREEN_BUFFER_INFO conInfo;
 	res = GetConsoleScreenBufferInfo(consoleOut, &conInfo);
 	if (res == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_CONSOLE_FULL_SETUP;
 	}
-	originalConsoleScreenBufferSize.X = conInfo.dwSize.X;
-	originalConsoleScreenBufferSize.Y = conInfo.dwSize.Y;
-	originalConsoleScreenBufferCoordinates.Left = conInfo.srWindow.Left;
-	originalConsoleScreenBufferCoordinates.Top = conInfo.srWindow.Top;
-	originalConsoleScreenBufferCoordinates.Right = conInfo.srWindow.Right;
-	originalConsoleScreenBufferCoordinates.Bottom = conInfo.srWindow.Bottom;
-	
-	GetConsoleMode(consoleOut, &originalConsoleOutMode);
-	GetConsoleMode(consoleIn, &originalConsoleMode);
-	
+	consoleScreenBufferSizeOriginal.X = conInfo.dwSize.X;
+	consoleScreenBufferSizeOriginal.Y = conInfo.dwSize.Y;
+	consoleScreenBufferCoordinatesOriginal.Left = conInfo.srWindow.Left;
+	consoleScreenBufferCoordinatesOriginal.Top = conInfo.srWindow.Top;
+	consoleScreenBufferCoordinatesOriginal.Right = conInfo.srWindow.Right;
+	consoleScreenBufferCoordinatesOriginal.Bottom = conInfo.srWindow.Bottom;
 	
 	CONSOLE_FONT_INFOEX cfi;
 	cfi.cbSize = sizeof(cfi);
@@ -273,147 +380,33 @@ int startFullCompatibility() { //add more error checking...
 	cfi.dwFontSize.Y = 20;
 	cfi.FontFamily = FF_DONTCARE;
 	cfi.FontWeight = FW_NORMAL;
-	wcscpyBasic(cfi.FaceName, desiredConsoleFont);
+	wcscpyBasic(cfi.FaceName, consoleFontDesiredName);
 	res = SetCurrentConsoleFontEx(consoleOut, FALSE, &cfi);
 	if (res == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_CONSOLE_FULL_SETUP;
 	}
 	
 	//What effect does this have on the background console "buffer" memory?
 	SMALL_RECT sRect = {0, 0, 1, 1};
 	res = SetConsoleWindowInfo(consoleOut, TRUE, &sRect);
 	if (res == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_CONSOLE_FULL_SETUP;
 	}
 	
 	COORD cSize = {80, 100};
 	res = SetConsoleScreenBufferSize(consoleOut, cSize);
 	if (res == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_CONSOLE_FULL_SETUP;
 	}
 	
 	sRect.Right = 79;
 	sRect.Bottom = 20;
 	res = SetConsoleWindowInfo(consoleOut, TRUE, &sRect);
 	if (res == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_CONSOLE_FULL_SETUP;
 	}
 	
-	DWORD consoleOutMode = originalConsoleOutMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-	DWORD consoleMode = ENABLE_PROCESSED_INPUT;//originalConsoleMode & (~ENABLE_ECHO_INPUT);
-	
-	SetConsoleMode(consoleOut, consoleOutMode);
-	SetConsoleMode(consoleIn, consoleMode);
-	
-	cmdCurrentArgument = (char*) GetCommandLineA();
-	
-	largePageSupport = 0; //To be implemented using: https://learn.microsoft.com/en-us/windows/win32/memory/large-page-support
-	
-	compatibilityState = COMPATIBILITY_STATE_FULL;
-	
-	return 0;
-}
-
-
-// Memory Operations:
-int getCompatibilityNewMemoryPage(void** memoryPtr, uint64_t* memoryBytes) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	*memoryBytes = (uint64_t) defaultPageSize;
-	*memoryPtr = VirtualAlloc(NULL, (SIZE_T) defaultPageSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	if (*memoryPtr == NULL) {
-		return ERROR_GET_EXTRA_INFO;
-	}
-	return 0;
-}
-
-int tryCompatibilitySetupLargeMemoryPages() {
-	/*
-	//HANDLE tokenHandle GetCurrentProcessToken();
-	//BOOL adjustTokenResult = AdjustTokenPrivileges(tokenHandle, FALSE, 
-	
-	HANDLE hToken = NULL;
-	TOKEN_PRIVILEGES tp;
-
-	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
-		//printf("OpenProcessToken #2 failed. GetLastError returned: %ld\n", GetLastError());
-		return -20;
-	}
-
-	tp.PrivilegeCount = 1;
-	tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-	if (!LookupPrivilegeValue(NULL, SE_LOCK_MEMORY_NAME, &tp.Privileges[0].Luid)) {
-		//printf("LookupPrivilegeValue failed. GetLastError returned: %ld\n", GetLastError());
-		return -21;
-	}
-
-	BOOL adjResult = AdjustTokenPrivileges(hToken, FALSE, &tp, 0, (PTOKEN_PRIVILEGES)NULL, 0);
-	DWORD lastError = GetLastError();
-
-	if (!adjResult || (lastError != ERROR_SUCCESS)) {
-		//printf("AdjustTokenPrivileges failed. GetLastError returned: %ld\n", lastError);
-		return -22;
-	}
-	
-	CloseHandle(hToken);
-	
-	largePageSupport = 1;
-	//*/
-	return 0;
-}
-
-int allocCompatibilityMemory(void** memoryPtr, uint64_t memoryBytes, uint64_t largePage) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	DWORD allocationType = MEM_COMMIT | MEM_RESERVE;
-	if (largePage > 0) { // do checks
-		SIZE_T largePageMinBytes = GetLargePageMinimum();
-		if ((memoryBytes % largePageMinBytes) != 0) {
-			return ERROR_LARGE_PAGE_PROBLEM;
-		}
-		if (largePageSupport == 0) {
-			return ERROR_LARGE_PAGE_PROBLEM;
-		}
-		allocationType |= MEM_LARGE_PAGES;
-	}
-	*memoryPtr = VirtualAlloc(NULL, (SIZE_T) memoryBytes, allocationType, PAGE_READWRITE);
-	if (*memoryPtr == NULL) {
-		return ERROR_GET_EXTRA_INFO;
-	}
-	return 0;
-}
-
-int deallocCompatibilityMemory(void** memoryPtr) {
-	BOOL freeResult = VirtualFree(*memoryPtr, 0, MEM_RELEASE);
-	if (freeResult == 0) {
-		return ERROR_GET_EXTRA_INFO;
-	}
-	*memoryPtr = NULL;
-	return 0;
-}
-
-
-// Console (With Buffer) State and Functions:
-static uint64_t consoleState = CONSOLE_STATE_UNDEFINED;
-static void* consoleBuffer = NULL;
-static char* consoleBufferPos = NULL;
-static uint64_t consoleByteSize = 0;
-static uint64_t consoleBytesRemaining = 0;
-static uint64_t consoleLastFlushTime = 0;
-
-int consoleBufferSetup() {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
-	if (consoleState >= CONSOLE_STATE_SETUP) {
-		return ERROR_CON_BUFFER_ALREADY_DEFINED;
-	}
-	
-	int error = getCompatibilityNewMemoryPage(&consoleBuffer, &consoleByteSize);
+	int error = memoryAllocateOnePage(&consoleBuffer, &consoleByteSize);
 	if (error != 0) {
 		return error;
 	}
@@ -422,13 +415,14 @@ int consoleBufferSetup() {
 	consoleBytesRemaining = consoleByteSize;
 	consoleLastFlushTime = getCurrentTime();
 	
-	consoleState = CONSOLE_STATE_SETUP;
+	consoleState = CONSOLE_STATE_FULL;
+	
 	return 0;
 }
 
 int consoleBufferFlush() {
-	if (consoleState < CONSOLE_STATE_SETUP) {
-		return ERROR_CON_BUFFER_UNDEFINED;
+	if (consoleState < CONSOLE_STATE_FULL) {
+		return ERROR_CONSOLE_WRONG_STATE;
 	}
 	
 	DWORD bytesToWrite = (DWORD) (consoleByteSize - consoleBytesRemaining);
@@ -436,10 +430,10 @@ int consoleBufferFlush() {
 		DWORD bytesWritten = 0;
 		BOOL res = WriteConsoleA(consoleOut, consoleBuffer, (DWORD) bytesToWrite, &bytesWritten, NULL);
 		if (res == 0) {
-			return ERROR_GET_EXTRA_INFO;
+			return ERROR_CONSOLE_WRITE;
 		}
 		if (bytesWritten != bytesToWrite) {
-			return ERROR_INCORRECT_WRITE_SIZE;
+			return ERROR_CONSOLE_WRITE_SIZE;
 		}
 		
 		consoleBufferPos = (char*) consoleBuffer;
@@ -447,48 +441,17 @@ int consoleBufferFlush() {
 	}
 	
 	consoleLastFlushTime = getCurrentTime();
-	
-	return 0;
-}
-
-int consoleBufferTerminate(uint64_t flush) {
-	if (consoleState < CONSOLE_STATE_SETUP) {
-		return 0;
-	}
-	
-	if (flush != 0) {
-		DWORD bytesToWrite = (DWORD) (consoleByteSize - consoleBytesRemaining);
-		DWORD bytesWritten = 0;
-		BOOL res = WriteConsoleA(consoleOut, consoleBuffer, (DWORD) bytesToWrite, &bytesWritten, NULL);
-		if (res == 0) {
-			//return ERROR_GET_EXTRA_INFO;
-		}
-		if (bytesWritten != bytesToWrite) {
-			//return ERROR_INCORRECT_WRITE_SIZE;
-		}
-	}
-	
-	int error = deallocCompatibilityMemory(&consoleBuffer);
-	if (error != 0) {
-		//return error;
-	}
-	consoleBuffer = NULL;
-	consoleBufferPos = NULL;
-	consoleByteSize = 0;
-	consoleBytesRemaining = 0;
-	
-	consoleState = CONSOLE_STATE_UNDEFINED;
 	return 0;
 }
 
 //Throws no error on invalid extra info
 int consoleWrite(char* strUTF8, uint64_t strBytes, uint64_t conExtraInfo) {
-	if (consoleState < CONSOLE_STATE_SETUP) {
-		return ERROR_CON_BUFFER_UNDEFINED;
+	if (consoleState < CONSOLE_STATE_FULL) {
+		return ERROR_CONSOLE_WRONG_STATE;
 	}
 	
 	if (strUTF8 == NULL) {
-		return ERROR_NULL_POINTER;
+		return ERROR_INVALID_ARGUMENT;
 	}
 	
 	if (strBytes > consoleBytesRemaining) {
@@ -503,10 +466,10 @@ int consoleWrite(char* strUTF8, uint64_t strBytes, uint64_t conExtraInfo) {
 		DWORD bytesWritten = 0;
 		BOOL res = WriteConsoleA(consoleOut, consoleBuffer, (DWORD) strBytes, &bytesWritten, NULL);
 		if (res == 0) {
-			return ERROR_GET_EXTRA_INFO;
+			return ERROR_CONSOLE_WRITE;
 		}
 		if (bytesWritten != ((DWORD) strBytes)) {
-			return ERROR_INCORRECT_WRITE_SIZE;
+			return ERROR_CONSOLE_WRITE_SIZE;
 		}
 	}
 	else {
@@ -532,7 +495,7 @@ int consoleWrite(char* strUTF8, uint64_t strBytes, uint64_t conExtraInfo) {
 	uint64_t currentTime = getCurrentTime();
 	uint64_t diffTimeMS = getDiffTimeMilliseconds(consoleLastFlushTime, currentTime);
 	
-	if ((consoleBytesRemaining < 256) || (diffTimeMS > CON_FLUSH_MS)) {
+	if ((consoleBytesRemaining < 256) || (diffTimeMS > CONSOLE_FLUSH_MS)) {
 		int error = consoleBufferFlush();
 		if (error != 0) {
 			return error;
@@ -542,11 +505,8 @@ int consoleWrite(char* strUTF8, uint64_t strBytes, uint64_t conExtraInfo) {
 	return 0;
 }
 
-void consoleWriteLineFast(char* strUTF8, uint64_t strBytes) {
-	//if (consoleState < CONSOLE_STATE_SETUP) {
-	//	return;
-	//}
-		
+//Fast Functions Assume Proper Console State
+void consoleWriteLineFast(char* strUTF8, uint64_t strBytes) {		
 	if ((strBytes+1) > consoleBytesRemaining) {
 		consoleBufferFlush();
 	}
@@ -563,23 +523,31 @@ void consoleWriteLineFast(char* strUTF8, uint64_t strBytes) {
 	uint64_t currentTime = getCurrentTime();
 	uint64_t diffTimeMS = getDiffTimeMilliseconds(consoleLastFlushTime, currentTime);
 	
-	if (diffTimeMS > CON_FLUSH_MS) {
+	if (diffTimeMS > CONSOLE_FLUSH_MS) {
 		consoleBufferFlush();
 	}
 }
 
-void consoleWriteLineSlow(char* strUTF8) {
-	if (consoleState < CONSOLE_STATE_SETUP) {
-		return;
+int consoleWriteLineSlow(char* strUTF8) {
+	if (consoleState < CONSOLE_STATE_FULL) {
+		return ERROR_CONSOLE_WRONG_STATE;
 	}
+	
 	
 	while (*strUTF8 != 0) {
+		if (consoleBytesRemaining == 0) {
+			consoleBufferFlush();
+		}
+		
 		*consoleBufferPos = *strUTF8;
 		consoleBufferPos++;
-		consoleBytesRemaining--;
 		strUTF8++;
+		consoleBytesRemaining--;
 	}
 	
+	if (consoleBytesRemaining == 0) {
+		consoleBufferFlush();
+	}
 	char newLine = '\n';
 	*consoleBufferPos = newLine;
 	consoleBufferPos++;
@@ -588,18 +556,20 @@ void consoleWriteLineSlow(char* strUTF8) {
 	uint64_t currentTime = getCurrentTime();
 	uint64_t diffTimeMS = getDiffTimeMilliseconds(consoleLastFlushTime, currentTime);
 	
-	if (diffTimeMS > CON_FLUSH_MS) {
+	if (diffTimeMS > CONSOLE_FLUSH_MS) {
 		consoleBufferFlush();
 	}
+	
+	return 0;
 }
 
 int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat, uint64_t conExtraInfo) {
-	if (consoleState < CONSOLE_STATE_SETUP) {
-		return ERROR_CON_BUFFER_UNDEFINED;
+	if (consoleState < CONSOLE_STATE_FULL) {
+		return ERROR_CONSOLE_WRONG_STATE;
 	}
 	
 	if (strUTF8 == NULL) {
-		return ERROR_NULL_POINTER;
+		return ERROR_INVALID_ARGUMENT;
 	}
 	
 	if ((conExtraInfo == CON_FLIP_ORDER) || (conExtraInfo == CON_FLIP_ORDER_NEW_LINE)) {
@@ -645,10 +615,10 @@ int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, ui
 			DWORD bytesWritten = 0;
 			BOOL res = WriteConsoleA(consoleOut, consoleBuffer, (DWORD) strBytes, &bytesWritten, NULL);
 			if (res == 0) {
-				return ERROR_GET_EXTRA_INFO;
+				return ERROR_CONSOLE_WRITE;
 			}
 			if (bytesWritten != ((DWORD) strBytes)) {
-				return ERROR_INCORRECT_WRITE_SIZE;
+				return ERROR_CONSOLE_WRITE_SIZE;
 			}
 		}
 		else {
@@ -677,10 +647,10 @@ int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, ui
 			DWORD bytesWritten = 0;
 			BOOL res = WriteConsoleA(consoleOut, consoleBuffer, (DWORD) strBytes, &bytesWritten, NULL);
 			if (res == 0) {
-				return ERROR_GET_EXTRA_INFO;
+				return ERROR_CONSOLE_WRITE;
 			}
 			if (bytesWritten != ((DWORD) strBytes)) {
-				return ERROR_INCORRECT_WRITE_SIZE;
+				return ERROR_CONSOLE_WRITE_SIZE;
 			}
 		}
 		else {
@@ -728,7 +698,7 @@ int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, ui
 	uint64_t currentTime = getCurrentTime();
 	uint64_t diffTimeMS = getDiffTimeMilliseconds(consoleLastFlushTime, currentTime);
 	
-	if ((consoleBytesRemaining < 256) || (diffTimeMS > CON_FLUSH_MS)) {
+	if ((consoleBytesRemaining < 256) || (diffTimeMS > CONSOLE_FLUSH_MS)) {
 		int error = consoleBufferFlush();
 		if (error != 0) {
 			return error;
@@ -738,11 +708,7 @@ int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, ui
 	return 0;
 }
 
-void consoleWriteLineWithNumberFast(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat) {
-	//if (consoleState < CONSOLE_STATE_SETUP) {
-	//	return;
-	//}
-	
+void consoleWriteLineWithNumberFast(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat) {	
 	if (strBytes > consoleBytesRemaining) {
 		consoleBufferFlush();
 	}
@@ -786,14 +752,14 @@ void consoleWriteLineWithNumberFast(char* strUTF8, uint64_t strBytes, uint64_t n
 	uint64_t currentTime = getCurrentTime();
 	uint64_t diffTimeMS = getDiffTimeMilliseconds(consoleLastFlushTime, currentTime);
 	
-	if (diffTimeMS > CON_FLUSH_MS) {
+	if (diffTimeMS > CONSOLE_FLUSH_MS) {
 		consoleBufferFlush();
 	}
 }
 
 int consoleControl(uint64_t conInstruction, uint64_t conExtraValue) {
-	if (consoleState < CONSOLE_STATE_SETUP) {
-		return ERROR_CON_BUFFER_UNDEFINED;
+	if (consoleState < CONSOLE_STATE_FULL) {
+		return ERROR_CONSOLE_WRONG_STATE;
 	}
 	
 	char newLine = '\n';
@@ -824,7 +790,7 @@ int consoleControl(uint64_t conInstruction, uint64_t conExtraValue) {
 	uint64_t currentTime = getCurrentTime();
 	uint64_t diffTimeMS = getDiffTimeMilliseconds(consoleLastFlushTime, currentTime);
 	
-	if ((consoleBytesRemaining < 256) || (diffTimeMS > CON_FLUSH_MS)) {
+	if ((consoleBytesRemaining < 256) || (diffTimeMS > CONSOLE_FLUSH_MS)) {
 		int error = consoleBufferFlush();
 		if (error != 0) {
 			return error;
@@ -834,10 +800,159 @@ int consoleControl(uint64_t conInstruction, uint64_t conExtraValue) {
 	return 0;
 }
 
+void consoleCleanup() {
+	if (consoleState == CONSOLE_STATE_FULL) {
+		consoleBufferFlush();
+		
+		memoryDeallocate(&consoleBuffer);
+		consoleBuffer = NULL;
+		consoleBufferPos = NULL;
+		consoleByteSize = 0;
+		consoleBytesRemaining = 0;
+		
+		
+		SetCurrentConsoleFontEx(consoleOut, FALSE, &consoleFontOrignal);
+		
+		SMALL_RECT sRect = {0, 0, 1, 1};
+		SetConsoleWindowInfo(consoleOut, TRUE, &sRect);
+		SetConsoleScreenBufferSize(consoleOut, consoleScreenBufferSizeOriginal);
+		SetConsoleWindowInfo(consoleOut, TRUE, &consoleScreenBufferCoordinatesOriginal);
+	}
+	
+	if (consoleState >= CONSOLE_STATE_MINIMUM) {
+		SetConsoleMode(consoleIn, consoleModeOriginal);
+		SetConsoleMode(consoleOut, consoleOutModeOriginal);
+		
+		SetConsoleCP(consoleCPOriginal);
+		SetConsoleOutputCP(consoleOutCPOriginal);
+		
+		consoleOut = NULL;
+		consoleIn = NULL;
+	}
+	
+	consoleState = CONSOLE_STATE_UNDEFINED;
+}
 
-int getCompatibilityArgument(uint64_t argumentNumber, char** argumentUTF8, uint64_t* argumentByteLength) {
-	LPSTR commandLineStr = GetCommandLineA();
-	char* charIterator = (char*) commandLineStr;
+
+int compatibilitySleep(uint64_t milliseconds) {
+	if (consoleState == CONSOLE_STATE_FULL) {
+		consoleBufferFlush();
+	}
+	
+	DWORD res = SleepEx((DWORD) milliseconds, TRUE); //True to return early due to callback functions
+	if (res == WAIT_IO_COMPLETION) {
+		return SLEEP_RETURN_IO_COMPLETION;
+	}
+	return 0;
+}
+
+void compatibilitySleepFast(uint64_t milliseconds) {
+	SleepEx(milliseconds, FALSE);
+}
+
+
+//I/O include Stuff
+#include <Commdlg.h> //Includes win32 command dialog "pop-up" boxes used for choosing an input file
+
+//#include <tchar.h> //needed for _tcscat_s
+//#include <shobjidl.h>
+
+// I/O State Codes:
+#define IO_STATE_UNDEFINED 0
+#define IO_STATE_SETUP 1
+static uint64_t ioState = IO_STATE_UNDEFINED;
+
+static void* ioTempBuffer = NULL;
+static uint64_t ioTempBufferByteSize = 0;
+static void* ioCommandArgumentBuffer = NULL;
+static char* ioCommandArgumentPosition = NULL;
+
+int ioSetup() {
+	int error = memoryAllocateOnePage(&ioTempBuffer, &ioTempBufferByteSize);
+	if (error != 0) {
+		return error;
+	}
+	
+	WCHAR* commandArguments = GetCommandLine();
+	int characters = WideCharToMultiByte(CP_UTF8, 0, commandArguments, -1, NULL, 0, NULL, NULL);
+	//consoleWriteLineWithNumberFast("Char N: ", 8, characters, NUM_FORMAT_UNSIGNED_INTEGER);
+	if (characters == 0) {
+		return ERROR_IO_UNICODE_TRANSLATE;
+	}
+	
+	error = memoryAllocate(&ioCommandArgumentBuffer, (uint64_t) characters, 0);
+	if (error != 0) {
+		return error;
+	}
+	
+	//uint64_t memBytes = 0;
+	//error = memoryGetSize(ioCommandArgumentBuffer, &memBytes);
+	//if (error != 0) {
+	//	return error;
+	//}
+	//consoleWriteLineWithNumberFast("Bytes: ", 7, memBytes, NUM_FORMAT_UNSIGNED_INTEGER);
+	
+	error = WideCharToMultiByte(CP_UTF8, 0, commandArguments, -1, (LPSTR) ioCommandArgumentBuffer, characters, NULL, NULL);
+	if (error != characters) {
+		consoleWriteLineWithNumberFast("ERROR: ", 7, (uint64_t) GetLastError(), NUM_FORMAT_FULL_HEXADECIMAL);
+		return ERROR_IO_UNICODE_TRANSLATE;
+	}
+	
+	
+	ioCommandArgumentPosition = (char*) ioCommandArgumentBuffer;
+	
+	ioState = IO_STATE_SETUP;
+	return 0;
+}
+
+//Needs update
+int ioGetNextCommandArgument(char** argumentUTF8, uint64_t* argumentByteLength) {
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
+	}
+	
+	char* charIterator = ioCommandArgumentPosition;
+	*argumentUTF8 = charIterator;
+	uint64_t byteLength = 0;
+	while (*charIterator != 0) { // NULL character
+		if (*charIterator == 32) { // SPACE (' ') character
+			if (byteLength != 0) {
+				*argumentByteLength = byteLength;
+				charIterator++;
+				ioCommandArgumentPosition = charIterator;
+				return 0;
+			}
+			charIterator++;
+			*argumentUTF8 = charIterator;
+		}
+		else if (*charIterator == 34) { // " character
+			while (*charIterator != 34) { //Not double check looking for NULL character
+				byteLength++;
+				charIterator++;
+			}
+		}
+		else if (*charIterator == 39) { // ' character
+			while (*charIterator != 39) { //Not double check looking for NULL character
+				byteLength++;
+				charIterator++;
+			}
+		}
+		byteLength++;
+		charIterator++;
+	}
+	*argumentByteLength = byteLength;
+	ioCommandArgumentPosition = NULL;
+	
+	return 0;
+}
+
+//Needs update
+int ioGetCommandArgument(uint64_t argumentNumber, char** argumentUTF8, uint64_t* argumentByteLength) {
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
+	}
+	
+	char* charIterator = (char*) ioCommandArgumentBuffer;
 	*argumentUTF8 = charIterator;
 	uint64_t byteLength = 0;
 	uint64_t argumentCounter = 0;
@@ -887,190 +1002,94 @@ int getCompatibilityArgument(uint64_t argumentNumber, char** argumentUTF8, uint6
 	return 0;
 }
 
-int getCompatibilityNextArgument(char** argumentUTF8, uint64_t* argumentByteLength) {
-	if (cmdCurrentArgument == 0) {
-			return ERROR_ARGUMENT_DNE;
-	}
-	char* charIterator = cmdCurrentArgument;
-	*argumentUTF8 = charIterator;
-	uint64_t byteLength = 0;
-	while (*charIterator != 0) { // NULL character
-		if (*charIterator == 32) { // SPACE (' ') character
-			if (byteLength != 0) {
-				*argumentByteLength = byteLength;
-				charIterator++;
-				cmdCurrentArgument = charIterator;
-				return 0;
-			}
-			charIterator++;
-			*argumentUTF8 = charIterator;
-		}
-		else if (*charIterator == 34) { // " character
-			while (*charIterator != 34) { //Not double check looking for NULL character
-				byteLength++;
-				charIterator++;
-			}
-		}
-		else if (*charIterator == 39) { // ' character
-			while (*charIterator != 39) { //Not double check looking for NULL character
-				byteLength++;
-				charIterator++;
-			}
-		}
-		byteLength++;
-		charIterator++;
-	}
-	*argumentByteLength = byteLength;
-	cmdCurrentArgument = 0;
-	return 0;
-}
-
-
-
-int compatibilitySleep(uint64_t milliseconds) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
-	consoleBufferFlush();
-	DWORD res = SleepEx((DWORD) milliseconds, TRUE); //True to return early due to callback functions
-	if (res == WAIT_IO_COMPLETION) {
-		return INFO_CALLBACK_FUNCTION_COMPLETION;
-	}
-	
-	return 0;
-}
-
-void compatibilitySleepFast(uint64_t milliseconds) {
-	SleepEx(milliseconds, FALSE);
-}
-
-int getCompatibilityTimestamp(uint64_t* timestamp) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
-	uint64_t nanoseconds100 = 0;
-	FILETIME* sysTimeUTC = (FILETIME*) &nanoseconds100;
-	
-	GetSystemTimePreciseAsFileTime(sysTimeUTC);
-	
-	uint64_t seconds = nanoseconds100 / 10000000;
-	uint64_t secondFraction = nanoseconds100 - (seconds * 10000000);
-	
-	seconds -= 9435484800; //Seconds Between Jan 1st 1601 and Jan 1st 1900
-	seconds <<= 32;
-	
-	secondFraction <<= 32;
-	secondFraction /= 10000000;
-	secondFraction &= 0xFFFFFFFF;
-	
-	*timestamp = seconds | secondFraction;
-	
-	return 0;
-}
-
-int getCompatibilityMilliseconds(uint64_t* milliseconds) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
-	SYSTEMTIME sysTimeUTC;
-	GetSystemTime(&sysTimeUTC);
-	
-	*milliseconds = sysTimeUTC.wMilliseconds;
-	
-	return 0;
-}
-
-
-static void* memPageBuffer = NULL;
-
-int setCompatibilityMemoryPageBuffer() {
-	uint64_t memoryBytes = 0;
-	return getCompatibilityNewMemoryPage(&memPageBuffer, &memoryBytes);
-}
-
-int openFile(void** filePtr, uint64_t flags, char* filePathUTF8, int filePathBytes) {
-	if (memPageBuffer == NULL) {
-		return ERROR_MEM_PAGE_BUFFER_UNDEFINED;
+int ioOpenFile(void** filePtr, char* filePathUTF8, int filePathBytes, uint64_t flags) {
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
 	}
 	int characters = MultiByteToWideChar(CP_UTF8, 0, filePathUTF8, filePathBytes, NULL, 0);
-	if (characters >= (defaultPageSize>>1)) {
-		return ERROR_NOT_ENOUGH_MEMORY;
+	if (characters >= (ioTempBufferByteSize>>1)) {
+		return ERROR_IO_TEMP_BUFF_NOT_ENOUGH_MEMORY;
 	}
-	LPWSTR filePathUTF16 = (LPWSTR) memPageBuffer;
+	LPWSTR filePathUTF16 = (LPWSTR) ioTempBuffer;
 	int result = MultiByteToWideChar(CP_UTF8, 0, filePathUTF8, filePathBytes, filePathUTF16, characters);
 	if (result == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_IO_UNICODE_TRANSLATE;
 	}
 	filePathUTF16[result] = 0;
 	
 	HANDLE fileHandle = NULL;
-	if (flags == 0) {
+	if (flags == IO_FILE_READ_NORMAL) {
 		fileHandle = CreateFile(filePathUTF16, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 	}
-	else if (flags == 1) {
+	else if (flags == IO_FILE_WRITE_NORMAL) {
 		fileHandle = CreateFile(filePathUTF16, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	}
-	else if (flags == 2) {
+	else if (flags == IO_FILE_READ_ASYNC) {
+		fileHandle = CreateFile(filePathUTF16, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+	}
+	else if (flags == IO_FILE_WRITE_ASYNC) {
 		fileHandle = CreateFile(filePathUTF16, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_FLAG_OVERLAPPED, NULL);
 	}
 	else {
-		return ERROR_TBD;
+		return ERROR_INVALID_ARGUMENT;
 	}
 	if (fileHandle == INVALID_HANDLE_VALUE) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_IO_CANNOT_OPEN_FILE;
 	}
 	
 	*filePtr = fileHandle;
 	return 0;
 }
 
-int closeFile(void** filePtr) {
+int ioCloseFile(void** filePtr) {
 	BOOL result = CloseHandle((HANDLE) *filePtr);
 	if (result == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_IO_CANNOT_CLOSE_FILE;
 	}
 	*filePtr = NULL;
 	return 0;
 }
 
-int getFileSize(void** filePtr, uint64_t* fileSizeBytes) {
+int ioGetFileSize(void** filePtr, uint64_t* fileSizeBytes) {
 	LARGE_INTEGER fileSizeEx;
 	BOOL result = GetFileSizeEx((HANDLE) *filePtr, &fileSizeEx);
 	if (result == 0) {
-		return ERROR_GET_EXTRA_INFO;
+		return ERROR_IO_CANNOT_GET_FILE_SIZE;
 	}
 	*fileSizeBytes = (uint64_t) fileSizeEx.QuadPart;
 	return 0;
 }
 
-int readFile(void** filePtr, void* dataPtr, uint32_t numBytes) {
+int ioReadFile(void** filePtr, void* dataPtr, uint32_t numBytes) {
 	DWORD readBytes = 0;
 	BOOL result = ReadFile((HANDLE) *filePtr, dataPtr, numBytes, &readBytes, NULL);
-	if (result == 0) { //readability
-		return ERROR_GET_EXTRA_INFO;
+	if (result == 0) {
+		return ERROR_IO_CANNOT_READ_FILE;
 	}
 	if (readBytes != numBytes) {
-		return ERROR_INCORRECT_READ_SIZE;
+		return ERROR_IO_WRONG_READ_SIZE;
 	}
 	return 0;
 }
 
-int writeFile(void* filePtr, void* dataPtr, uint32_t numBytes) {
+int ioWriteFile(void* filePtr, void* dataPtr, uint32_t numBytes) {
 	DWORD writtenBytes = 0;
 	BOOL result = WriteFile((HANDLE) filePtr, dataPtr, numBytes, &writtenBytes, NULL);
-	if (result == 0) { //writeability
-		return ERROR_GET_EXTRA_INFO;
+	if (result == 0) {
+		return ERROR_IO_CANNOT_WRITE_FILE;
 	}
 	if (writtenBytes != numBytes) {
-		return ERROR_INCORRECT_WRITE_SIZE;
+		return ERROR_IO_WRONG_WRITE_SIZE;
 	}
 	return 0;
 }
 
-int selectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8) {
+//Needs some work
+int ioSelectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8) {
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
+	}
+	
 	//IFileDialog pfd = NULL;
 	//IFileDialogEvents *pfde = NULL;
 	//HRESULT hrRes = CoCreateInstance(CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd));
@@ -1152,13 +1171,60 @@ int selectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8) {
 	return 0;
 }
 
-void readFileFast(void** filePtr, void* dataPtr, uint32_t numBytes) {
-	ReadFile((HANDLE) *filePtr, dataPtr, numBytes, NULL, NULL);
+void ioCleanup() {
+	if (ioState == IO_STATE_SETUP) {		
+		memoryDeallocate(&ioCommandArgumentBuffer);
+		ioCommandArgumentPosition = NULL;
+		
+		memoryDeallocate(&ioTempBuffer);
+		ioTempBufferByteSize = 0;
+	}
+	
+	ioState = IO_STATE_UNDEFINED;
 }
 
-void writeFileFast(void** filePtr, void* dataPtr, uint32_t numBytes) {
-	WriteFile((HANDLE) *filePtr, dataPtr, numBytes, NULL, NULL);
+
+// Compatibility Setup and Cleanup Helper Functions:
+int compatibilitySetup() {
+	int error = timeFunctionSetup();
+	if (error != 0) {
+		return error;
+	}
+	
+	consoleSetupMinimum();
+	error = consoleSetupFull();
+	if (error != 0) {
+		return error;
+	}
+	
+	error = ioSetup();
+	if (error != 0) {
+		return error;
+	}
+	
+	return 0;
 }
+
+void compatibilityCleanup() {
+	ioCleanup();
+	consoleCleanup();
+}
+
+
+#define INITGUID //So there is no need to link to libdxguid.a (smaller .rdata section size too)
+#include <dxgi1_6.h> //Needed to get adapters (GPU devices)
+#include <d3d11.h>   //Windows DirectX 11: Version 11.1 is needed for Desktop Duplication
+
+#define VK_USE_PLATFORM_WIN32_KHR //Define Vulkan To Use 
+#include "include/vulkan/vulkan.h"
+
+#include "include/cuda/cuda.h"
+#include "include/nvEncodeAPI.h"
+
+#include <winsock2.h> //Windows Networking Header
+#include <ws2tcpip.h> //Needed for additional windows networking functions and definitions (IPv6)
+#include <mswsock.h> //Needed for (better) recv and send socket operations and some socket option defines
+
 
 
 //#define RETURN_ON_ERROR_EXTRA(error, extra,) ({if (error != 0) { return error; }})
@@ -2845,12 +2911,8 @@ static int desktopDuplicationSetupNvEnc() {
 
 
 int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
 	if (desktopDuplicationState > DESKDUPL_STATE_UNDEFINED) {
-		return ERROR_NOT_STARTED_ENOUGH;
+		return ERROR_DESKDUPL_WRONG_STATE;
 	}
 	
 	int error = desktopDuplicationSetupDX11();
@@ -2892,7 +2954,7 @@ int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutB
 
 int desktopDuplicationLoadLUT() {
 	if (desktopDuplicationState != DESKDUPL_STATE_LUT_LOAD) {
-		return ERROR_NOT_STARTED_ENOUGH;
+		return ERROR_DESKDUPL_WRONG_STATE;
 	}
 	
 	//The staging buffer was populated with the LUT data
@@ -2921,7 +2983,7 @@ int desktopDuplicationLoadLUT() {
 
 int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	if (desktopDuplicationState != DESKDUPL_STATE_STARTED) {
-		return ERROR_NOT_STARTED_ENOUGH;
+		return ERROR_DESKDUPL_WRONG_STATE;
 	}
 	
 	//Copy Image to Staging
@@ -2946,7 +3008,7 @@ int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	}
 	
 	//Write Image Data to file
-	int error = writeFile(rawARGBfilePtr, imgData, 8294400); 
+	int error = ioWriteFile(rawARGBfilePtr, imgData, 8294400); 
 	if (error != 0) {
 		return error;
 	}
@@ -2983,7 +3045,7 @@ int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	}
 	
 	//Write output to file
-	error = writeFile(bitstreamFilePtr, nvEncBitstreamLock.bitstreamBufferPtr, nvEncBitstreamLock.bitstreamSizeInBytes); 
+	error = ioWriteFile(bitstreamFilePtr, nvEncBitstreamLock.bitstreamBufferPtr, nvEncBitstreamLock.bitstreamSizeInBytes); 
 	
 	nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff0.bitstreamBuffer);
 	if (nvEncRes != NV_ENC_SUCCESS) {
@@ -3020,7 +3082,7 @@ static DWORD WINAPI ddEncodeLockThread(LPVOID lpParam) {
 		}
 		BOOL setRes = SetEvent(ddLockEvent);
 		if (setRes == 0) {
-			return ERROR_GET_EXTRA_INFO;
+			return ERROR_EVENT_NOT_SET;
 		}
 		bitTest ^= 1; //XOR with 1
 		if (bitTest == 0) {
@@ -3067,7 +3129,7 @@ static uint64_t ddAcquireOffset = 0;
 
 int desktopDuplicationStart(uint64_t fps) {
 	if (desktopDuplicationState != DESKDUPL_STATE_STARTED) {
-		return ERROR_NOT_STARTED_ENOUGH;
+		return ERROR_DESKDUPL_WRONG_STATE;
 	}
 	
 	//Release Frame
@@ -3207,7 +3269,7 @@ int desktopDuplicationStart(uint64_t fps) {
 	
 	ddFrameIntervalTime = timeCounterFrequency / fps;
 	ddFirstFrameStartTime = currentTime; // + (ddFrameIntervalTime >> 1);
-	ddAcquireOffset = 500 * microsecondDivider;
+	ddAcquireOffset = 500 * timeMicrosecondDivider;
 	
 	desktopDuplicationState = DESKDUPL_STATE_RUNNING;
 	return 0;
@@ -3215,7 +3277,7 @@ int desktopDuplicationStart(uint64_t fps) {
 
 int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 	if (desktopDuplicationState < DESKDUPL_STATE_RUNNING) {
-		return ERROR_NOT_STARTED_ENOUGH;
+		return ERROR_DESKDUPL_WRONG_STATE;
 	}
 	
 	if ((ddState & 64) > 0) { //Frame Released
@@ -3229,7 +3291,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 				//consoleWriteLineFast("Acquiring Image", 15);
 				DXGI_OUTDUPL_FRAME_INFO frameInfo;
 				IDXGIResource* desktopResourcePtr = NULL;
-				HRESULT hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, 0, &frameInfo, &desktopResourcePtr);
+				HRESULT hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, 1, &frameInfo, &desktopResourcePtr);
 				if (hrRes == S_OK) { //Acquired Something (Might just be mouse stuff)
 					uint64_t presentationTime = (uint64_t) frameInfo.LastPresentTime.QuadPart;
 					if (presentationTime >= frameStartTime) { //Actually acquired image and it is in the expected time
@@ -3414,7 +3476,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 			}
 			BOOL setRes = SetEvent(ddEncodeEvent);
 			if (setRes == 0) {
-				return ERROR_GET_EXTRA_INFO;
+				return ERROR_EVENT_NOT_SET;
 			}
 			
 			ddState |= 4;
@@ -3440,15 +3502,15 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 
 int desktopDuplicationStop() {
 	uint64_t latency = ddAcquireLatencySum / ddAcquireCount;
-	latency /= microsecondDivider;
+	latency /= timeMicrosecondDivider;
 	consoleWriteLineWithNumberFast("Avg Acquire Latency in us: ", 27, latency, NUM_FORMAT_UNSIGNED_INTEGER);
 	
 	latency = ddComputeLatencySum / ddComputeCount;
-	latency /= microsecondDivider;
+	latency /= timeMicrosecondDivider;
 	consoleWriteLineWithNumberFast("Avg Compute Latency in us: ", 27, latency, NUM_FORMAT_UNSIGNED_INTEGER);
 	
 	latency = ddEncodeLatencySum / ddEncodeCount;
-	latency /= microsecondDivider;
+	latency /= timeMicrosecondDivider;
 	consoleWriteLineWithNumberFast("Avg Encoder Latency in us: ", 27, latency, NUM_FORMAT_UNSIGNED_INTEGER);
 	
 	consoleWriteLineWithNumberFast("Repeated Frame Count: ", 22, ddRepeatCount, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -3517,7 +3579,7 @@ int desktopDuplicationGetFrame() {
 }
 //*/
 
-int desktopDuplicationClean() {
+int desktopDuplicationCleanup() {
 	if (desktopDuplicationState == DESKDUPL_STATE_UNDEFINED) {
 		return 0;
 	}
@@ -3537,7 +3599,7 @@ void vulkanGetError(int* error) {
 	*error = vulkanExtraInfo;
 }
 
-void nvEncodeGetError(int* error) {
+void nvidiaGetError(int* error) {
 	*error = nvEncExtraInfo;
 }
 
@@ -3547,8 +3609,8 @@ static uint64_t shortByteSwap(uint64_t value) {
 	return ((value & 0xFF00) >> 8) | ((value & 0xFF) << 8);
 }
 
-#define RETURN_ON_INVALID_SOCKET(socket) ({if (networkSocket == INVALID_SOCKET) {	return ERROR_WSA_EXTRA_INFO; }})
-#define RETURN_ON_SOCKET_ERROR(error) ({if (error == SOCKET_ERROR) {	return ERROR_WSA_EXTRA_INFO; }})
+#define RETURN_ON_INVALID_SOCKET(socket) ({if (networkSocket == INVALID_SOCKET) {	return ERROR_NETWORK_TBD; }})
+#define RETURN_ON_SOCKET_ERROR(error) ({if (error == SOCKET_ERROR) {	return ERROR_NETWORK_TBD; }})
 
 static const char localHostStr[] = "::"; //IPv6 LocalHost Address (Short Form) "::1" is specifically loopback only
 static const uint64_t serverPort = 4567;
@@ -3566,6 +3628,14 @@ static const uint64_t msgBufSizeTest = 1400;
 #define NETWORK_STATE_SERVER 5
 static uint64_t networkState = NETWORK_STATE_UNDEFINED;
 
+void compatibilityGetNetworkError(int* error) {
+	if (networkState == NETWORK_STATE_UNDEFINED) {
+		return;
+	}
+	
+	*error = (int) WSAGetLastError();
+}
+
 static SOCKET networkSocket = INVALID_SOCKET;
 LPFN_WSARECVMSG WSARecvMsgF = NULL;
 LPFN_WSASENDMSG WSASendMsgF = NULL;
@@ -3579,13 +3649,9 @@ static void* networkSendBuffer = NULL;
 static uint64_t networkCurrentSendBuffer = 0;
 
 //NULL terminated server address string
-int networkStartup(uint64_t isServer, char* serverAddress) {
-	if (compatibilityState < COMPATIBILITY_STATE_FULL) {
-		return ERROR_NOT_STARTED_ENOUGH;
-	}
-	
+int networkStartup(uint64_t isServer, char* serverAddress) {	
 	if (networkState > NETWORK_STATE_UNDEFINED) {
-		return ERROR_NOT_STARTED_ENOUGH;
+		return ERROR_NETWORK_WRONG_STATE;
 	}
 	
 	//Windows Networking Startup:
@@ -3598,7 +3664,7 @@ int networkStartup(uint64_t isServer, char* serverAddress) {
 	//Receive and Send Buffers Setup:
 	uint64_t allocationSize = (msgBufSize * recvMsgBuffers) >> 12; // 4096 byte sizes rounded up
 	allocationSize = (allocationSize + 1) << 12; 
-	error = allocCompatibilityMemory(&networkRecvBuffer, allocationSize, 0);
+	error = memoryAllocate(&networkRecvBuffer, allocationSize, 0);
 	RETURN_ON_ERROR(error);
 	
 	char* recvMsgBuf = (char*) networkRecvBuffer;
@@ -3617,7 +3683,7 @@ int networkStartup(uint64_t isServer, char* serverAddress) {
 		WSAOVERLAPPED* WSAOverlappedPtr = (WSAOVERLAPPED*) &recvMsgBuf[168];
 		WSAOverlappedPtr->hEvent = WSACreateEvent();
 		if (WSAOverlappedPtr->hEvent == WSA_INVALID_EVENT) {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 		recvMsgBuf += msgBufSize;
 	}
@@ -3625,7 +3691,7 @@ int networkStartup(uint64_t isServer, char* serverAddress) {
 	
 	allocationSize = (msgBufSizeTest * sendMsgBuffers) >> 12; // 4096 byte sizes rounded up
 	allocationSize = (allocationSize + 1) << 12; 
-	error = allocCompatibilityMemory(&networkSendBuffer, allocationSize, 0);
+	error = memoryAllocate(&networkSendBuffer, allocationSize, 0);
 	RETURN_ON_ERROR(error);
 	
 	char* sendMsgBuf = (char*) networkSendBuffer;
@@ -3646,7 +3712,7 @@ int networkStartup(uint64_t isServer, char* serverAddress) {
 		WSAOVERLAPPED* WSAOverlappedPtr = (WSAOVERLAPPED*) &sendMsgBuf[168];
 		WSAOverlappedPtr->hEvent = WSACreateEvent();
 		if (WSAOverlappedPtr->hEvent == WSA_INVALID_EVENT) {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 		sendMsgBuf += msgBufSizeTest;
 	}
@@ -3780,7 +3846,7 @@ int networkStartup(uint64_t isServer, char* serverAddress) {
 		if (error == SOCKET_ERROR) {
 			int extraError = WSAGetLastError();
 			if (extraError != WSA_IO_PENDING) {
-				return ERROR_WSA_EXTRA_INFO;
+				return ERROR_NETWORK_TBD;
 			}
 		}
 		else {
@@ -3829,12 +3895,12 @@ int networkCleanup() {
 	}
 		
 	//Receive and Send Buffers Cleanup:
-	int error = deallocCompatibilityMemory(&networkSendBuffer);
+	int error = memoryDeallocate(&networkSendBuffer);
 	if (error != 0) {
 		//return error;
 	}
 	
-	error = deallocCompatibilityMemory(&networkRecvBuffer);
+	error = memoryDeallocate(&networkRecvBuffer);
 	if (error != 0) {
 		//return error;
 	}
@@ -3848,16 +3914,7 @@ int networkCleanup() {
 	return 0;
 }
 
-void getCompatibilityWSAError(int* error) {
-	if (compatibilityState < COMPATIBILITY_STATE_BARE) {
-		return;
-	}
-	if (networkState == NETWORK_STATE_UNDEFINED) {
-		return;
-	}
-	
-	*error = (int) WSAGetLastError();
-}
+
 
 int networkGetServerAddrPort(netAddrPortFlow* addrPort) {
 	if (networkState < NETWORK_STATE_CLIENT) {
@@ -3905,11 +3962,11 @@ int networkGetNextRecvMessageBuffer(uint8_t** recvMsgBuf, uint64_t* recvMsgBytes
 			WSAMsgPtr->dwFlags = 0;
 			//BOOL res = WSAResetEvent(WSAOverlappedPtr->hEvent);
 			//if (res == FALSE) {
-			//	return ERROR_WSA_EXTRA_INFO;
+			//	return ERROR_NETWORK_TBD;
 			//}
 		}
 		else {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 	}
 	*recvMsgBuf = (uint8_t*) &bufPtr[200];
@@ -3924,7 +3981,7 @@ int networkGetNextRecvMessageBuffer(uint8_t** recvMsgBuf, uint64_t* recvMsgBytes
 	if (error == SOCKET_ERROR) {
 		int extraError = WSAGetLastError();
 		if (extraError != WSA_IO_PENDING) {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 	}
 	else {
@@ -3954,7 +4011,7 @@ int networkGetAddrPortStr(char* addrPortStr, uint64_t* addrPortBytes, uint64_t c
 	if (currRecvAddr == 0) {
 		int error = getsockname(networkSocket, (SOCKADDR*) &localAddress, &addressSize);
 		if (error == SOCKET_ERROR) {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 		address = (SOCKADDR*) &localAddress;
 	}
@@ -3967,7 +4024,7 @@ int networkGetAddrPortStr(char* addrPortStr, uint64_t* addrPortBytes, uint64_t c
 	
 	int error = WSAAddressToStringA(address, (DWORD) addressSize, NULL, addrPortStr, (DWORD*) addrPortBytes);
 	if (error == SOCKET_ERROR) {
-		return ERROR_WSA_EXTRA_INFO;
+		return ERROR_NETWORK_TBD;
 	}
 	
 	*addrPortBytes -= 1;
@@ -4007,7 +4064,7 @@ int networkGetNextSendMessageBuffer(uint8_t** sendMsgBuf, uint64_t* sendMsgMaxBy
 	if (res == FALSE) {
 		int extraError = WSAGetLastError();
 		if (extraError != WSA_IO_INCOMPLETE) {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 		else {
 			return NETWORK_SEND_PENDING;
@@ -4044,7 +4101,7 @@ int networkSendMessage(netAddrPortFlow* addrPort, uint64_t sendBytes) {
 	if (error == SOCKET_ERROR) {
 		int extraError = WSAGetLastError();
 		if (extraError != WSA_IO_PENDING) {
-			return ERROR_WSA_EXTRA_INFO;
+			return ERROR_NETWORK_TBD;
 		}
 	}
 	
@@ -4074,51 +4131,12 @@ int networkWaitOnSentMessages() {
 	DWORD sendFlagsResult;
 	BOOL res = WSAGetOverlappedResult(networkSocket, (WSAOVERLAPPED*) &bufPtr[168], &actualBytesSent, TRUE, &sendFlagsResult);
 	if (res == FALSE) {
-		return ERROR_WSA_EXTRA_INFO;
+		return ERROR_NETWORK_TBD;
 	}
 	
 	return 0;
 }
 
 
-static void stopCompatibility() {
-	if (networkState > NETWORK_STATE_UNDEFINED) {
-		networkCleanup();
-	}
-	
-	if (consoleState > CONSOLE_STATE_UNDEFINED) {
-		consoleBufferTerminate(0);
-	}
-	
-	if (compatibilityState >= COMPATIBILITY_STATE_FULL) {
-		SetCurrentConsoleFontEx(consoleOut, FALSE, &originalConsoleFont);
-		
-		SMALL_RECT sRect = {0, 0, 1, 1};
-		SetConsoleWindowInfo(consoleOut, TRUE, &sRect);
-		SetConsoleScreenBufferSize(consoleOut, originalConsoleScreenBufferSize);
-		SetConsoleWindowInfo(consoleOut, TRUE, &originalConsoleScreenBufferCoordinates);
-		
-		SetConsoleMode(consoleIn, originalConsoleMode);
-		SetConsoleMode(consoleOut, originalConsoleOutMode);
-	}
-	
-	if (compatibilityState >= COMPATIBILITY_STATE_BARE) {
-		SetConsoleCP(originalConsoleCP);
-		SetConsoleOutputCP(originalConsoleOutCP);
-	}	
-	
-	if (memPageBuffer != NULL) {
-		deallocCompatibilityMemory(&memPageBuffer);
-		memPageBuffer = NULL;
-	}
-	
-	
-	compatibilityState = COMPATIBILITY_STATE_UNDEFINED;
-}
 
-void exitCompatibility(int returnError) {
-	stopCompatibility();
-	
-	ExitProcess((DWORD) returnError);
-}
 

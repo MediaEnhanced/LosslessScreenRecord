@@ -71,8 +71,13 @@ CompatibilityWindowsObjects = ./bin/obj/compatibilityWin32.o ./bin/obj/compatibi
 
 MathObjects = ./bin/obj/log2.o ./bin/obj/exp2.o ./bin/obj/math.o ./bin/obj/mathAssembly.o 
 
-./bin/obj/main.o: ./src/main.c ./src/compatibility.h ./src/math.h | ./bin/obj/
+ProgramEntry = ./src/compatibility.h ./src/programStrings.h ./src/programEntry.h
+
+./bin/obj/main.o: ./src/main.c $(ProgramEntry) ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/main.o ./src/main.c
+
+./bin/obj/playback.o: ./src/playback.c $(ProgramEntry) | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/playback.o ./src/playback.c
 
 ./bin/CreateStringsData.exe: ./src/createStringsData.c ./src/elf.h | ./bin
 	gcc $(CompilerArguments) $(CompilerWarnings) -s -o ./bin/CreateStringsData.exe ./src/createStringsData.c
@@ -119,12 +124,19 @@ gccLibraries = -lgcc
 
 TempLibraries = $(gccLibraryDirectory) $(gccLibraries)
 
-./bin/LosslessScreenRecord.exe: ./bin/obj/main.o $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/stringsData.o ./bin/obj/binData.o ./bin/obj/win32Resource.o ./bin/FixExecutableCudaDLL.exe
-	ld -o ./bin/LosslessScreenRecord.exe -estartP -s -static --gc-sections \
-	./bin/obj/main.o $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/stringsData.o ./bin/obj/binData.o ./bin/obj/win32Resource.o \
+WindowsLinkingObjects = $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/stringsData.o ./bin/obj/win32Resource.o
+
+./bin/LosslessScreenRecord.exe: ./bin/obj/main.o $(WindowsLinkingObjects) ./bin/obj/binData.o
+	ld -o ./bin/LosslessScreenRecord.exe -eprogramEntry -s -static --gc-sections \
+	./bin/obj/main.o $(WindowsLinkingObjects) ./bin/obj/binData.o \
 	$(LinkerLibraries) $(TempLibraries)
 
-WindowsExecutables: ./bin/LosslessScreenRecord.exe
+./bin/VulkanVideoPlayback.exe: ./bin/obj/playback.o $(WindowsLinkingObjects)
+	ld -o ./bin/VulkanVideoPlayback.exe -eprogramEntry -s -static --gc-sections \
+	./bin/obj/playback.o $(WindowsLinkingObjects) \
+	$(LinkerLibraries) $(TempLibraries)
+
+WindowsExecutables: ./bin/LosslessScreenRecord.exe ./bin/VulkanVideoPlayback.exe
 
 WindowsClean:
 	cmd /c rmdir /s /q .\bin

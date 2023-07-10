@@ -1,11 +1,14 @@
-Program Ran Successfully!
 Program Error: 
 Extra Error Info: 
-WSA Error Info: 
-DD Error Info: 
-Vulkan Error Info: 
-nvEncode Error Info: 
 Press <Enter> to Exit
+Program Started!
+Vulkan Error Info: 
+Network Error Info: 
+OS Graphics Error Info: 
+NVIDIA Cuda or Encoder Error Info: 
+Intel Encoder Error Info: 
+AMD Encoder Error Info: 
+Program Ran Successfully!
 Total Program Run Time: 
 us
 ms
@@ -19,13 +22,13 @@ d
  minutes
  hours
  days
-Program Started!
 ỤȾƑ-8 įṡ Ẅồřκȉȵɠ
-Press <Enter> to Continue
 Attempting to Startup Desktop Duplication
 Desktop Duplication Successfully Started
 Press <Enter> to Start Recording
 Recording 60 seconds at 60 fps
-A rare timing error occurred... please try program again!
-Partial Record Saved: "bitstream.h265"
 Recording Finshed and Saved: "bitstream.h265"
+Only Partial Record Saved: "bitstream.h265"
+Creating Vulkan Window
+Opening File for Vulkan Video Playback
+

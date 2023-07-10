@@ -31,42 +31,8 @@
 //between OSes and insteads calls specific implementations for relevant functions
 // More Details Here in the Future
 
-#include "compatibility.h" //Includes <stdint.h> too
+#include "programEntry.h" //Includes "programStrings.h" & "compatibility.h" & <stdint.h>
 #include "math.h" //Includes the math function definitions
-
-//UTF-8 is used Everywhere EXCEPT when calling MOST Windows OS API Functions
-//in which cases the UTF-8 strings will be converted to UTF-16 before being
-//passed along to the function calls
-//This design choice makes it easy to stay consistent across OSes for code
-//editing, string literal storeage, and program runtime (user interactions)
-//It also makes it easier to provide proper localization when necessary
-
-//Seperating string literals from the code makes it easy to translate text to
-//other languages while simply refering to the relevant text as line numbers
-//The UTF-8 strings can be managed in a line seperated text file which gets
-//compiled during the Make process to a string array and linked into the
-//final executable under its own initalized data section
-//The strings data base pointer can be offset using the index data to find the
-//start pointer of a specific text line
-//Note that these strings DO NOT have a 0 byte terminating the text
-extern uint8_t stringsData[];
-extern uint32_t stringsIndices[];
-
-//String Literal Helper Varaibles and Macros:
-static char* strs = (char*) stringsData;
-static uint32_t* strsOff = stringsIndices;
-
-#define consolePrintLineDirect(line) consoleWriteLineDirect(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1)
-#define consolePrintLineWithNumberDirect(line, number, format) consoleWriteLineWithNumberDirect(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, number, format);
-
-#define consolePrint(line, conInfo) consoleWrite(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, conInfo)
-#define consolePrintLine(line) consoleWriteLineFast(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1)
-#define consolePrintWithNumber(line, number, format, conInfo) consoleWriteWithNumber(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, number, format, conInfo);
-#define consolePrintLineWithNumber(line, number, format) consoleWriteLineWithNumberFast(strs + strsOff[line], strsOff[line+1] - strsOff[line] - 1, number, format);
-
-//Exit due to error Helper Macros
-#define EXIT_ON_ERROR(error) ({if (error != 0) { exitP(error); }})
-#define EXIT_EARLY (EXIT_ON_ERROR(1));
 
 //During the Make process the GLSL Vulkan Compute Shader gets compiled to SPIR-V
 //and then this binary data gets linked into the program via the following definitons
@@ -672,73 +638,20 @@ void populateSRGBtoYCbCr709fullLUT(uint32_t* lutData, uint32_t bits) {
 	
 }
 
-//Program Exit Function
-void exitP(int error) {
-	consoleBufferFlush();
-	
-	// Exit and print additional error if necessary
-	if (error == 0) {
-		consolePrintLineDirect(1);
-	}
-	else {
-		consolePrintLineWithNumberDirect(2, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		if (error == ERROR_GET_EXTRA_INFO) {
-			getCompatibilityExtraError(&error);
-			consolePrintLineWithNumberDirect(3, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		}
-		else if (error == ERROR_WSA_EXTRA_INFO) {
-			getCompatibilityWSAError(&error);
-			consolePrintLineWithNumberDirect(4, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		}
-		else if ((error >= ERROR_DESKDUPL_CREATE_FACTORY) && (error <= ERROR_DESKDUPL_KEYEDMUTEX_QUERY)) {
-			desktopDuplicationGetError(&error);
-			consolePrintLineWithNumberDirect(5, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		}
-		else if ((error >= ERROR_VULKAN_EXTRA_INFO) && (error < ERROR_NVENC_EXTRA_INFO)) {
-			vulkanGetError(&error);
-			consolePrintLineWithNumberDirect(6, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		}
-		else if (error == ERROR_NVENC_EXTRA_INFO) {
-			nvEncodeGetError(&error);
-			consolePrintLineWithNumberDirect(7, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		}
-	}
-	
-	consolePrintLineDirect(8);
-	consoleWaitForEnter();
-	
-	exitCompatibility(error);
-}
-
-//Program Entry Function
-void startP() {
-	int error = startFullCompatibility();
-	EXIT_ON_ERROR(error);
-	
-	//consoleWaitForEnter();
-	
-	error = consoleBufferSetup();
-	EXIT_ON_ERROR(error);
-	
-	uint64_t startTime = getCurrentTime();
-	
-	consoleControl(CON_NEW_LINE, 0);
-	consolePrintLine(22);
-	//consolePrintLine(23);
-	
-	//consolePrintLine(24);
-	//consoleBufferFlush();
-	//consoleWaitForEnter();
+//Program Main Function
+int programMain() {
+	//consoleControl(CON_NEW_LINE, 0);
+	consolePrintLine(25);
 	
 	//Start-up Desktop Duplication
-	consolePrintLine(25);
+	consolePrintLine(26);
 	size_t shaderSize = shader_size;
 	//consolePrintLineWithNumber(24, shaderSize, NUM_FORMAT_UNSIGNED_INTEGER);
 	uint32_t* shaderData = (uint32_t*) shader_data;
 	//consolePrintLineWithNumber(24, (uint64_t) shaderData[0], NUM_FORMAT_PARTIAL_HEXADECIMAL);
 	uint32_t* lutBufferPtr = NULL;
-	error = desktopDuplicationSetup(shaderSize, shaderData, (void**) &lutBufferPtr);
-	EXIT_ON_ERROR(error);
+	int error = desktopDuplicationSetup(shaderSize, shaderData, (void**) &lutBufferPtr);
+	RETURN_ON_ERROR(error);
 	
 	populateSRGBtoXVYCbCrLUT(lutBufferPtr, 1, 1);
 	
@@ -750,19 +663,19 @@ void startP() {
 	void* lutMemoryVoid = NULL;
 	size_t lutMemorySize = SRGB_MAX_VALUE * sizeof(double);
 	error = allocCompatibilityMemory(&lutMemoryVoid, (uint64_t) lutMemorySize, 0);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	
 	populateSRGBtoXVYCbCrLUT2(lutBufferPtr, 1, 1, (double*) lutMemoryVoid);
 	
 	error = deallocCompatibilityMemory(&lutMemoryVoid);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	//*/
 	
 	/*
 	void* lutMemoryVoid = NULL;
 	size_t lutMemorySize = (NUM_SRGB_VALUES * sizeof(uint32_t)) + (SRGB_MAX_VALUE * sizeof(double));
 	error = allocCompatibilityMemory(&lutMemoryVoid, (uint64_t) lutMemorySize, 0);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	
 	uint32_t* lutData = (uint32_t*) lutMemoryVoid;
 	double* lutHelper = (double*) (lutMemoryVoid + (NUM_SRGB_VALUES * sizeof(uint32_t)));
@@ -778,54 +691,50 @@ void startP() {
 	//consolePrintLineWithNumber(24, lutData[1], NUM_FORMAT_PARTIAL_HEXADECIMAL);
 	
 	error = deallocCompatibilityMemory(&lutMemoryVoid);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	//*/
 	
 	error = desktopDuplicationLoadLUT();
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	
 	//error = desktopDuplicationGetFrame();
-	//EXIT_ON_ERROR(error);
-	
-	//Load Up Output Bitstream File
-	error = setCompatibilityMemoryPageBuffer();
-	EXIT_ON_ERROR(error);
-	
+	//RETURN_ON_ERROR(error);
 	
 	/*
+	Load Up Output Bitstream File
 	void* h265File = NULL;
-	error = openFile(&h265File, 1, "bitstream0.h265", 15);
-	EXIT_ON_ERROR(error);
+	error = openFile(&h265File, "bitstream0.h265", 15, IO_FILE_WRITE_NORMAL);
+	RETURN_ON_ERROR(error);
 	
 	void* imgFile = NULL;
 	error = openFile(&imgFile, 1, "image0.rgb", 10);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	
 	
 	error = desktopDuplicationTestFrame(imgFile, h265File);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	
 	
 	error = closeFile(&imgFile);
-	EXIT_ON_ERROR(error);
+	RETURN_ON_ERROR(error);
 	//*/
 	
 	//*
 	void* h265File = NULL;
-	error = openFile(&h265File, 2, "bitstream.h265", 15);
-	EXIT_ON_ERROR(error);
+	error = ioOpenFile(&h265File, "bitstream.h265", 14, IO_FILE_WRITE_ASYNC);
+	RETURN_ON_ERROR(error);
 	
-	consolePrintLine(26);
 	consolePrintLine(27);
+	consolePrintLine(28);
 	consoleBufferFlush();
 	consoleWaitForEnter();
-	consolePrintLine(28);
+	consolePrintLine(29);
 	
 	uint64_t fps = 60;
 	uint64_t recordSeconds = 60;
 	
 	int ddError = desktopDuplicationStart(fps);
-	EXIT_ON_ERROR(ddError);
+	RETURN_ON_ERROR(ddError);
 	consoleBufferFlush();
 	
 	uint64_t numOfFrames = fps * recordSeconds;
@@ -834,66 +743,31 @@ void startP() {
 	while (numWrittenFrames < numOfFrames) {
 		ddError = desktopDuplicationRun(h265File, &numWrittenFrames);
 		if (ddError > 1000) {
-			break;
+			break; //Need to handle the possible errors in the future
 		}
 		else if (ddError > 1) {
-			//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, (error-1), NUM_FORMAT_UNSIGNED_INTEGER);
 			//compatibilitySleepFast(1);//error-1);
 			sleepTotal++;
 		}
 	}
-	desktopDuplicationStop();
-	//consoleWriteLineWithNumberFast("Sleeping MS: ", 13, sleepTotal, NUM_FORMAT_UNSIGNED_INTEGER);
-	//*/
-	
-	
 	//Close (and Save) Output Bitstream File
-	error = closeFile(&h265File);
-	EXIT_ON_ERROR(error);
+	error = ioCloseFile(&h265File);
+	RETURN_ON_ERROR(error);
 	
-	if (ddError > 1000) {
-		if (ddError == ERROR_RARE_TIMING_DESYNC) {
-			consolePrintLine(29);
-		}
+	desktopDuplicationStop();
+	
+	if (ddError <= 1000) {
 		consolePrintLine(30);
-		EXIT_ON_ERROR(ddError);
 	}
 	else {
 		consolePrintLine(31);
+		RETURN_ON_ERROR(ddError);
 	}
 	
-	//Stop Desktop Duplication
-	//desktopDuplicationStop();
+	//Desktop Duplication Clean
+	desktopDuplicationCleanup();
 	
-	consoleBufferFlush();
-	uint64_t stopTime = getCurrentTime();
-	
-	consoleControl(CON_NEW_LINE, 0);
-	consolePrint(9, 0); // Display total run time in relevant units
-	uint64_t runTime = getDiffTimeMicroseconds(startTime, stopTime);
-	if (runTime < 1000) {
-		consolePrintWithNumber(10, runTime, NUM_FORMAT_UNSIGNED_INTEGER, CON_FLIP_ORDER_NEW_LINE);
-	}
-	else {
-		runTime = getDiffTimeMilliseconds(startTime, stopTime);
-		if (runTime < 1000) {
-			consolePrintWithNumber(11, runTime, NUM_FORMAT_UNSIGNED_INTEGER, CON_FLIP_ORDER_NEW_LINE);
-		}
-		else {
-			runTime = getDiffTimeSeconds(startTime, stopTime);
-			if (runTime < 60) {
-				consolePrintWithNumber(12, runTime, NUM_FORMAT_UNSIGNED_INTEGER, CON_FLIP_ORDER_NEW_LINE);
-			}
-			else {
-				uint64_t runTimeMinutes = runTime / 60;
-				runTime %= 60;
-				consolePrintWithNumber(13, runTimeMinutes, NUM_FORMAT_UNSIGNED_INTEGER, CON_FLIP_ORDER);
-				consoleControl(CON_CURSOR_ADVANCE, 1);
-				consolePrintWithNumber(12, runTime, NUM_FORMAT_UNSIGNED_INTEGER, CON_FLIP_ORDER_NEW_LINE);
-			}
-		}
-	}
-	
-	exitP(error); //error should = 0 here to indicate a successful program run
+	//consoleBufferFlush();
+	return 0;
 }
 
