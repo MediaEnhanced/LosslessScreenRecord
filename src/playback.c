@@ -38,13 +38,15 @@ int programMain() {
 	consolePrintLine(32);
 	
 	//Vulkan Create Window
+	int error = vulkanWindowCreate();
+	RETURN_ON_ERROR(error);
 	
 	//Open Bitstream File and Extract the Dimensions
 	consolePrintLine(33);
 	void* h265File = NULL;
 	char* inputFileName = "bitstream.h265";
 	uint64_t inputFileNameSize = 14;
-	int error = ioOpenFile(&h265File, inputFileName, inputFileNameSize, IO_FILE_READ_NORMAL);
+	error = ioOpenFile(&h265File, inputFileName, inputFileNameSize, IO_FILE_READ_NORMAL);
 	RETURN_ON_ERROR(error);
 	
 	//Create the Vulkan Video

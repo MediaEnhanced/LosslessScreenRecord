@@ -47,13 +47,15 @@ CompilerWarnings = -Wall
  # -Wextra -Wwrite-strings -pedantic -g3 More Warnings in the future
 
 ./bin/obj/compatibility.o: ./src/compatibility.c ./src/compatibility.h | ./bin/obj/
-	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibility.o ./src/compatibility.c
+	gcc $(CompilerArguments) -O1 $(CompilerWarnings) -c -o ./bin/obj/compatibility.o ./src/compatibility.c
+ #-O1 to counter the automatic memset insert until functions get converted to assembly
 
 ./bin/obj/compatibilityAssembly.o: ./src/compatibilityAssembly.asm | ./bin/obj/
 	FASM ./src/compatibilityAssembly.asm ./bin/obj/compatibilityAssembly.o
 
 ./bin/obj/compatibilityWin32.o: ./src/compatibilityWin32.c ./src/compatibility.h ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibilityWin32.o ./src/compatibilityWin32.c
+ #-fstack-usage to output stack usage per function so that it can be adjusted to be lower than 4096 bytes
 
 CompatibilityWindowsObjects = ./bin/obj/compatibilityWin32.o ./bin/obj/compatibility.o ./bin/obj/compatibilityAssembly.o
 
@@ -118,8 +120,8 @@ Libraries = -l:kernel32.dll -l:dxgi.dll -l:d3d11.dll -l:ws2_32.dll
 
 LinkerLibraries = $(LocalLibraryDirectory) $(LocalLibraries) $(WindowsLibraryDirectory) $(Libraries)
 
-gccLibraryDirectory = -LC:/mingw64/lib/gcc/x86_64-w64-mingw32/13.1.0
-gccLibraries = -lgcc
+ #gccLibraryDirectory = -LC:/mingw64/lib/gcc/x86_64-w64-mingw32/13.1.0
+ #gccLibraries = -lgcc
  #needed for gcc automatic windows function stack correction (when a function uses more than 4096 bytes / a page for the stack)
 
 TempLibraries = $(gccLibraryDirectory) $(gccLibraries)
@@ -129,12 +131,14 @@ WindowsLinkingObjects = $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/
 ./bin/LosslessScreenRecord.exe: ./bin/obj/main.o $(WindowsLinkingObjects) ./bin/obj/binData.o
 	ld -o ./bin/LosslessScreenRecord.exe -eprogramEntry -s -static --gc-sections \
 	./bin/obj/main.o $(WindowsLinkingObjects) ./bin/obj/binData.o \
-	$(LinkerLibraries) $(TempLibraries)
+	$(LinkerLibraries)
+ #$(TempLibraries)
 
 ./bin/VulkanVideoPlayback.exe: ./bin/obj/playback.o $(WindowsLinkingObjects)
 	ld -o ./bin/VulkanVideoPlayback.exe -eprogramEntry -s -static --gc-sections \
 	./bin/obj/playback.o $(WindowsLinkingObjects) \
-	$(LinkerLibraries) $(TempLibraries)
+	$(LinkerLibraries)
+ #$(TempLibraries)
 
 WindowsExecutables: ./bin/LosslessScreenRecord.exe ./bin/VulkanVideoPlayback.exe
 

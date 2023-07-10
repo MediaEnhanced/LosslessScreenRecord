@@ -2,9 +2,9 @@ Program Error:
 Extra Error Info: 
 Press <Enter> to Exit
 Program Started!
+OS Graphics Error Info: 
 Vulkan Error Info: 
 Network Error Info: 
-OS Graphics Error Info: 
 NVIDIA Cuda or Encoder Error Info: 
 Intel Encoder Error Info: 
 AMD Encoder Error Info: 

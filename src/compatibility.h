@@ -47,7 +47,7 @@ uint64_t ASM_CALLING_CONVENTION shortToDecStr(char* strPtr, uint64_t number);
 
 //Common Compatibility Functions: Implemented in compatibility.c
 void* memcpyBasic(void* dest, const void* src, size_t count);
-
+void* memzeroBasic(void* ptr, size_t size);
 
 //Non Common Misc Functions:
 void compatibilityExit(int returnError);
@@ -141,6 +141,17 @@ int compatibilitySetup();
 void compatibilityCleanup();
 
 
+// Compatibility Graphics Functions:
+void compatibilityGraphicsGetError();
+
+// Vulkan Functions:
+void vulkanGetError(int* error);
+int vulkanWindowCreate();
+
+// Nvidia Functions For Cuda and NVENC Libraries:
+void nvidiaGetError(int* error);
+
+
 int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
 int desktopDuplicationLoadLUT();
 int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr);
@@ -157,14 +168,12 @@ int desktopDuplicationPrintEncodingStats();
 
 int desktopDuplicationCleanup();
 
-void desktopDuplicationGetError(int* error);
-void vulkanGetError(int* error);
-void nvidiaGetError(int* error);
 
 
 
 
 
+// General Compatibility Errors:
 #define ERROR_ARGUMENT_DNE 0x0FFE
 #define ERROR_INVALID_ARGUMENT 0x0FFF
 #define ERROR_TIMER_BAD 0x1000
@@ -193,31 +202,9 @@ void nvidiaGetError(int* error);
 
 #define ERROR_TBD 0x103F
 
-
-// Compatibility Error Codes:
-#define ERROR_RETURN_EARLY 0x0500
-
-
-
-
-
-
-
-#define ERROR_MEM_PAGE_BUFFER_UNDEFINED 0x3000
-#define ERROR_NOT_ENOUGH_MEMORY 0x3002
-
-
-
-
-
-
-
-
-
-
 #define NVIDIA_PCI_VENDER_ID 4318
 
-
+// Vulkan Errors:
 #define ERROR_VULKAN_EXTRA_INFO 0x5040
 #define ERROR_VULKAN_CREATE_INSTANCE_FAILED 0x5041
 #define ERROR_VULKAN_NO_PHYSICAL_DEVICES 0x5042
@@ -236,6 +223,11 @@ void nvidiaGetError(int* error);
 #define ERROR_VULKAN_COM_BUF_END_FAILED 0x504F
 #define ERROR_VULKAN_MEM_MAP_FAILED 0x5050
 #define ERROR_VULKAN_TBD 0x507F
+
+
+
+
+
 
 #define ERROR_DESKDUPL_CREATE_FACTORY 0x5000
 #define ERROR_DESKDUPL_ENUM_ADAPTER 0x5001

@@ -1211,15 +1211,367 @@ void compatibilityCleanup() {
 }
 
 
+//Graphics Definitions and Includes
 #define INITGUID //So there is no need to link to libdxguid.a (smaller .rdata section size too)
 #include <dxgi1_6.h> //Needed to get adapters (GPU devices)
 #include <d3d11.h>   //Windows DirectX 11: Version 11.1 is needed for Desktop Duplication
 
+static HRESULT graphicsError = S_OK;
+void compatibilityGraphicsGetError(int* error) {
+	*error = (int) graphicsError;
+}
+
+static IDXGIAdapter* graphicsAdapter = NULL; //Primary Adapter Interface Pointer
+static LUID graphicsAdapterID = {0, 0};
+static UINT graphicsVenderID = 0;
+
+static int graphicsSetupAdapter() {
+	if (graphicsAdapter != NULL) {
+		return 0;
+	}
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
+	}
+	
+	
+	IDXGIFactory6* dxgiFactoryInterface = NULL;
+	HRESULT hrRes = CreateDXGIFactory1(&IID_IDXGIFactory6, (void**) &dxgiFactoryInterface);
+	if (hrRes != S_OK) {
+		graphicsError = hrRes;
+		return ERROR_DESKDUPL_CREATE_FACTORY;
+	}
+	
+	//DXGI_GPU_PREFERENCE_UNSPECIFIED: First returns the adapter (GPU device) with the output on which the desktop primary is displayed
+	//DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE: Get the adapter (GPU device) by choosing the most performant discrete one (if it exisits and there is no "external" GPU device)
+	hrRes = dxgiFactoryInterface->lpVtbl->EnumAdapterByGpuPreference(dxgiFactoryInterface, 0, DXGI_GPU_PREFERENCE_UNSPECIFIED, &IID_IDXGIAdapter, (void**) &graphicsAdapter);
+	if (hrRes != S_OK) {
+		graphicsError = hrRes;
+		return ERROR_DESKDUPL_ENUM_ADAPTER;
+	}
+	dxgiFactoryInterface->lpVtbl->Release(dxgiFactoryInterface);
+	
+	IDXGIAdapter1* adapter1Interface = NULL;
+	hrRes = graphicsAdapter->lpVtbl->QueryInterface(graphicsAdapter, &IID_IDXGIAdapter1, (void**) &adapter1Interface);
+	if (hrRes != S_OK) {
+		graphicsError = hrRes;
+		return ERROR_DESKDUPL_ENUM_OUTPUT;
+	}
+	
+	DXGI_ADAPTER_DESC1* adapterDescription = (DXGI_ADAPTER_DESC1*) ioTempBuffer; //GPU Info
+	hrRes = adapter1Interface->lpVtbl->GetDesc1(adapter1Interface, adapterDescription);
+	if (hrRes != S_OK) {
+		graphicsError = hrRes;
+		return ERROR_DESKDUPL_ADAPTER_DESC;
+	}
+	
+	//Save the adapter ID
+	graphicsAdapterID.LowPart = adapterDescription->AdapterLuid.LowPart;
+	graphicsAdapterID.HighPart = adapterDescription->AdapterLuid.HighPart;
+	//consoleWriteLineWithNumberFast("UUID Low:  ", 11, graphicsAdapterID.LowPart, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	//consoleWriteLineWithNumberFast("UUID High: ", 11, graphicsAdapterID.HighPart, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	
+	graphicsVenderID = adapterDescription->VendorId;
+	//consoleWriteLineWithNumberFast("Vender ID: ", 11, graphicsVenderID, NUM_FORMAT_UNSIGNED_INTEGER);
+	
+	adapter1Interface->lpVtbl->Release(adapter1Interface);
+	
+	return 0;
+}
+
+
+
 #define VK_USE_PLATFORM_WIN32_KHR //Define Vulkan To Use 
 #include "include/vulkan/vulkan.h"
+#define VULKAN_ALLOCATOR NULL
+
+static VkResult vulkanExtraInfo = VK_SUCCESS;
+void vulkanGetError(int* error) {
+	*error = vulkanExtraInfo;
+}
+
+//Vulkan State
+static VkInstance vulkanInstance = VK_NULL_HANDLE;
+static VkDevice vulkanDevice = VK_NULL_HANDLE;
+
+static int vulkanCreateInstance() {
+	if (vulkanInstance != VK_NULL_HANDLE) {
+		return 0;
+	}
+	
+	VkApplicationInfo appInfo = {};
+	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+	appInfo.pApplicationName = "Vulkan App";
+	appInfo.applicationVersion = 1;
+	appInfo.pEngineName = "Vulkan Engine";
+	appInfo.engineVersion = VK_MAKE_API_VERSION(1, 0, 0, 0);
+	appInfo.apiVersion = VK_API_VERSION_1_3;
+	
+	VkInstanceCreateInfo createInfo = {};
+	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+	createInfo.pApplicationInfo = &appInfo;
+	
+	createInfo.enabledLayerCount = 0; //Can change this to use validation layers
+	
+	createInfo.enabledExtensionCount = 2;
+	const char* const extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+	createInfo.ppEnabledExtensionNames = extensions;
+	
+	VkResult result = vkCreateInstance(&createInfo, VULKAN_ALLOCATOR, &vulkanInstance);
+	if (result != VK_SUCCESS) {
+		vulkanExtraInfo = result;
+		return ERROR_VULKAN_CREATE_INSTANCE_FAILED;
+	}
+	
+	return 0;
+}
+
+int vulkanWindowCreate() {
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
+	}
+	
+	int error = graphicsSetupAdapter();
+	RETURN_ON_ERROR(error);
+	
+	error = vulkanCreateInstance();
+	RETURN_ON_ERROR(error);
+	
+	VkPhysicalDevice* pDevices = (VkPhysicalDevice*) ioTempBuffer;
+	uint32_t deviceCount = 32; //256 Bytes: 32 * 8 (sizeof(VkPhysicalDevice))
+	vkEnumeratePhysicalDevices(vulkanInstance, &deviceCount, pDevices);
+	if (deviceCount == 0) {
+		return ERROR_VULKAN_NO_PHYSICAL_DEVICES;
+	}
+	
+	VkPhysicalDeviceIDProperties devicePropertiesID;
+	devicePropertiesID.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+	devicePropertiesID.pNext = NULL;
+	
+	VkPhysicalDeviceProperties2 deviceProperties2;
+	deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	deviceProperties2.pNext = &devicePropertiesID;
+	
+	VkPhysicalDevice vulkanPhysicalDevice = VK_NULL_HANDLE;
+	for (uint32_t d = 0; d < deviceCount; d++) {
+		vkGetPhysicalDeviceProperties2(pDevices[d], &deviceProperties2);
+		
+		if (devicePropertiesID.deviceLUIDValid == VK_TRUE) {
+			uint32_t* deviceUUID = (uint32_t*) &(devicePropertiesID.deviceLUID);
+			if (deviceUUID[0] == graphicsAdapterID.LowPart) {
+				if (deviceUUID[1] == graphicsAdapterID.HighPart) {
+					vulkanPhysicalDevice = pDevices[d];
+					d = deviceCount; //break;
+				}
+			}
+		}		
+	}
+	if (vulkanPhysicalDevice == VK_NULL_HANDLE) {
+		return ERROR_VULKAN_CANNOT_FIND_GPU;
+	}
+	
+	
+	//Find Vulkan Graphics and Vulkan Video Queue Family Index (that includes graphics capabilities)
+	uint32_t computeQueueFamilyIndex = 256;
+	VkQueueFamilyProperties* pQueueFamilyProperties = (VkQueueFamilyProperties*) ioTempBuffer;
+	uint32_t queueFamilyCount = 32; //768 Bytes: 32 * 24 (sizeof(VkQueueFamilyProperties))
+	vkGetPhysicalDeviceQueueFamilyProperties(vulkanPhysicalDevice, &queueFamilyCount, pQueueFamilyProperties);
+	
+	//for (uint32_t q = 0; q < queueFamilyCount; q++) {
+	//	VkQueueFlags qF = pQueueFamilyProperties[q].queueFlags;
+	//	consoleWriteLineWithNumberFast("Queue Flags: ", 13, qF, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	//}
+	
+	//uint32_t computeTransferCount = 0;
+	for (uint32_t q = 0; q < queueFamilyCount; q++) {
+		VkQueueFlags qF = pQueueFamilyProperties[q].queueFlags;
+		
+		if ((qF & VK_QUEUE_COMPUTE_BIT) && (qF & VK_QUEUE_TRANSFER_BIT )) {
+			//computeTransferCount++;
+			computeQueueFamilyIndex = q;
+			if ((qF & VK_QUEUE_GRAPHICS_BIT) == 0) { //If there is one not sharing a graphics queue break early
+				q = queueFamilyCount; //break;
+			}
+		}
+	}
+	if (computeQueueFamilyIndex == 256) {
+		return ERROR_VULKAN_NO_COMPUTE_QUEUE;
+	}
+	
+	return 0;
+}
+
+
 
 #include "include/cuda/cuda.h"
 #include "include/nvEncodeAPI.h"
+
+static int nvidiaError = 0;
+void nvidiaGetError(int* error) {
+	*error = nvidiaError;
+}
+
+static CUcontext nvidiaCudaContext = 0;
+
+static int nvidiaSetupCuda() {
+	if (nvidiaCudaContext != 0) {
+		return 0;
+	}
+	
+	//Setup CUDA interface first
+	CUresult cuRes = cuInit(0);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_NO_INIT;
+	}
+	
+	//Do CUDA Version check in future once knowing what to compare it to
+	int cudaVersion = 0;
+	cuRes = cuDriverGetVersion(&cudaVersion);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_GET_VERSION;
+	}
+	//consoleWriteLineWithNumberFast("Cuda Version: ", 14, (uint64_t) cudaVersion, NUM_FORMAT_UNSIGNED_INTEGER);
+	if (cudaVersion < 10000) {
+		return ERROR_CUDA_LOW_VERSION;
+	}
+	
+	
+	CUdevice nvidiaCudaDevice = 0;
+	int numCudaDevices = 0;
+	cuRes = cuDeviceGetCount(&numCudaDevices);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_NO_DEVICES;
+	}
+	if (numCudaDevices == 0) {
+		return ERROR_CUDA_NO_DEVICES;
+	}
+	
+	//int cudaDeviceNum = 0;
+	for (int d=0; d<numCudaDevices; d++) {
+		cuRes = cuDeviceGet(&nvidiaCudaDevice, 0);
+		if (cuRes != CUDA_SUCCESS) {
+			nvidiaError = (int) cuRes;
+			return ERROR_CUDA_CANNOT_GET_DEVICE;
+		}
+		
+		char luid[16] = {};
+		unsigned int deviceNodeMask = 0;
+		cuRes = cuDeviceGetLuid(luid, &deviceNodeMask, nvidiaCudaDevice);
+		if (cuRes != CUDA_SUCCESS) {
+			nvidiaError = (int) cuRes;
+			return ERROR_CUDA_CANNOT_GET_DEVICE_LUID;
+		}
+		
+		uint32_t* luidConversion = (uint32_t*) luid;
+		//consoleWriteLineWithNumberFast("UUID Low:  ", 11, luidConversion[0], NUM_FORMAT_PARTIAL_HEXADECIMAL);
+		//consoleWriteLineWithNumberFast("UUID High: ", 11, luidConversion[1], NUM_FORMAT_PARTIAL_HEXADECIMAL);
+		if (luidConversion[0] == graphicsAdapterID.LowPart) {
+			if (luidConversion[1] == graphicsAdapterID.HighPart) {
+				//cudaDeviceNum = d;
+				d = numCudaDevices; //break
+			}
+		}
+	}
+	
+	unsigned int cudaContexFlags = 0;
+	int cudaContexState = 0;
+	cuRes = cuDevicePrimaryCtxGetState(nvidiaCudaDevice, &cudaContexFlags, &cudaContexState);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_GET_CONTEXT_STATE;
+	}
+	//consoleWriteLineWithNumberFast("Context Flags: ", 15, cudaContexFlags, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	//consoleWriteLineWithNumberFast("Context State: ", 15, cudaContexState, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	if (cudaContexState == 1) {
+		consoleWriteLineFast("Warning: Cuda Possibly Active!", 30);
+	}
+	
+	//consoleWriteLineSlow("Cuda Device Init");
+	//consoleBufferFlush();
+	//consoleWaitForEnter();
+	
+	
+	//Get Cuda Context, can set flags with: cuDevicePrimaryCtxSetFlags() function
+	cuRes = cuDevicePrimaryCtxRetain(&nvidiaCudaContext, nvidiaCudaDevice);
+	//cuRes = cuCtxCreate(&nvidiaCudaContext, 0, nvidiaCudaDevice); //Doesn't have an effect
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_GET_CONTEXT;
+	}
+	
+	//consoleWriteLineSlow("Cuda Context Init");
+	//consoleBufferFlush();
+	//consoleWaitForEnter();
+	
+	cuRes = cuCtxPushCurrent(nvidiaCudaContext);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_PUSH_CONTEXT;
+	}
+	
+	size_t cudaBytes = 0;
+	//cuRes = cuCtxGetLimit(&cudaBytes, CU_LIMIT_STACK_SIZE);
+	//if (cuRes != CUDA_SUCCESS) {
+	//	nvidiaError = (int) cuRes;
+	//	return ERROR_CUDA_CANNOT_GET_LIMIT;
+	//}
+	//consoleWriteLineWithNumberFast("Cuda Limit: ", 12, cudaBytes, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	
+	cudaBytes = 0;
+	cuRes = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, cudaBytes);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_SET_LIMIT;
+	}
+	cuRes = cuCtxSetLimit(CU_LIMIT_PRINTF_FIFO_SIZE, cudaBytes);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_SET_LIMIT;
+	}
+	cuRes = cuCtxSetLimit(CU_LIMIT_MALLOC_HEAP_SIZE, cudaBytes);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_SET_LIMIT;
+	}
+	//cuRes = cuCtxSetLimit(CU_LIMIT_DEV_RUNTIME_PENDING_LAUNCH_COUNT, cudaBytes);
+	//if (cuRes != CUDA_SUCCESS) {
+	//	nvidiaError = (int) cuRes;
+	//	return ERROR_CUDA_CANNOT_SET_LIMIT;
+	//}
+	cuRes = cuCtxSetLimit(CU_LIMIT_DEV_RUNTIME_SYNC_DEPTH, cudaBytes);
+	if (cuRes != CUDA_SUCCESS) {
+		nvidiaError = (int) cuRes;
+		return ERROR_CUDA_CANNOT_SET_LIMIT;
+	}
+	
+	//cuRes = cuCtxGetLimit(&cudaBytes, CU_LIMIT_STACK_SIZE);
+	//if (cuRes != CUDA_SUCCESS) {
+	//	nvidiaError = (int) cuRes;
+	//	return ERROR_CUDA_CANNOT_GET_LIMIT;
+	//}
+	//consoleWriteLineWithNumberFast("Cuda Limit: ", 12, cudaBytes, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	
+	//size_t cudaFreeMem = 0;
+	//size_t cudaTotalMem = 0;
+	//cuRes = cuMemGetInfo(&cudaFreeMem, &cudaTotalMem);
+	//if (cuRes != CUDA_SUCCESS) {
+	//	return ERROR_NVENC_EXTRA_INFO;
+	//}
+	//consoleWriteLineWithNumberFast("Cuda Free:  ", 12, cudaFreeMem, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	//consoleWriteLineWithNumberFast("Cuda Total: ", 12, cudaTotalMem, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+	
+	//consoleWriteLineSlow("Cuda Context Modify");
+	//consoleBufferFlush();
+	//consoleWaitForEnter();
+	
+	return 0;
+}
+
+
+
+
 
 #include <winsock2.h> //Windows Networking Header
 #include <ws2tcpip.h> //Needed for additional windows networking functions and definitions (IPv6)
@@ -1235,14 +1587,8 @@ void compatibilityCleanup() {
 #define DESKDUPL_STATE_RUNNING 3
 #define DESKDUPL_STATE_NEXT_FRAME 4
 
-
-
 static uint64_t desktopDuplicationState = DESKDUPL_STATE_UNDEFINED;
 
-static int desktopDuplicationExtraInfo = S_OK;
-
-static IDXGIAdapter* desktopDuplicationAdapter = NULL; //Adapter Interface Pointer
-static LUID desktopDuplicationAdapterID = {0, 0};
 static ID3D11Device* desktopDuplicationDevice = NULL; //Device Interface Pointer
 static IDXGIOutputDuplication* desktopDuplicationPtr = NULL;
 static uint32_t desktopDuplicationWidth = 0;
@@ -1251,64 +1597,29 @@ static HANDLE desktopDuplicationTextureHandle = NULL;
 static IDXGIKeyedMutex* desktopDuplicationKeyedMutex = NULL;
 
 static int desktopDuplicationSetupDX11() {
-	IDXGIFactory6* dxgiFactoryInterface = NULL;
-	HRESULT hrRes = CreateDXGIFactory1(&IID_IDXGIFactory6, (void**) &dxgiFactoryInterface);
-	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
-		return ERROR_DESKDUPL_CREATE_FACTORY;
-	}
-	
-	//DXGI_GPU_PREFERENCE_UNSPECIFIED: First returns the adapter (GPU device) with the output on which the desktop primary is displayed
-	//DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE: Get the adapter (GPU device) by choosing the most performant discrete one (if it exisits and there is no "external" GPU device)
-	hrRes = dxgiFactoryInterface->lpVtbl->EnumAdapterByGpuPreference(dxgiFactoryInterface, 0, DXGI_GPU_PREFERENCE_UNSPECIFIED, &IID_IDXGIAdapter, (void**) &desktopDuplicationAdapter);
-	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
-		return ERROR_DESKDUPL_ENUM_ADAPTER;
-	}
-	
-	IDXGIAdapter1* adapter1Interface = NULL;
-	hrRes = desktopDuplicationAdapter->lpVtbl->QueryInterface(desktopDuplicationAdapter, &IID_IDXGIAdapter1, (void**) &adapter1Interface);
-	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
-		return ERROR_DESKDUPL_ENUM_OUTPUT;
-	}
-	
-	DXGI_ADAPTER_DESC1 adapterDescription; //GPU Info
-	hrRes = adapter1Interface->lpVtbl->GetDesc1(adapter1Interface, &adapterDescription);
-	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
-		return ERROR_DESKDUPL_ADAPTER_DESC;
-	}
+	int error = graphicsSetupAdapter();
+	RETURN_ON_ERROR(error);
 	
 	//Check if Card is NVIDIA brand
-	//consoleWriteLineWithNumberFast("Vender ID: ", 11, adapterDescription.VendorId, NUM_FORMAT_UNSIGNED_INTEGER);
-	if (adapterDescription.VendorId != NVIDIA_PCI_VENDER_ID) {
+	if (graphicsVenderID != NVIDIA_PCI_VENDER_ID) {
 		return ERROR_DESKDUPL_ADAPTER_NOT_VALID;
 	}
-	
-	//Save the adapter ID
-	desktopDuplicationAdapterID.LowPart = adapterDescription.AdapterLuid.LowPart;
-	desktopDuplicationAdapterID.HighPart = adapterDescription.AdapterLuid.HighPart;
-	//consoleWriteLineWithNumberFast("UUID Low:  ", 11, desktopDuplicationAdapterID.LowPart, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	//consoleWriteLineWithNumberFast("UUID High: ", 11, desktopDuplicationAdapterID.HighPart, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	
-	adapter1Interface->lpVtbl->Release(adapter1Interface);
 	
 	//Creates a DirectX 11.1 Device by using chosen adapter
 	//Necessary to target DirectX 11.1 which supports at least DXGI 1.2 which is used for desktop duplication
 	D3D_FEATURE_LEVEL minDXfeatureTarget = D3D_FEATURE_LEVEL_11_1; //Minimum Direct X 11 Feature Level Target to Perform Desktop Duplication
 	UINT creationFlags = 0;//D3D11_CREATE_DEVICE_DEBUG | D3D11_CREATE_DEVICE_BGRA_SUPPORT; //Maybe used to debug in future
-	hrRes = D3D11CreateDevice(desktopDuplicationAdapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, creationFlags, &minDXfeatureTarget, 1, D3D11_SDK_VERSION, &desktopDuplicationDevice, NULL, NULL);
+	HRESULT hrRes = D3D11CreateDevice(graphicsAdapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, creationFlags, &minDXfeatureTarget, 1, D3D11_SDK_VERSION, &desktopDuplicationDevice, NULL, NULL);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_CREATE_DEVICE;
 	}
 	
 	//Create DXGI Output (Represents a monitor)
 	IDXGIOutput* dxgiOutputInterface = NULL; 
-	hrRes = desktopDuplicationAdapter->lpVtbl->EnumOutputs(desktopDuplicationAdapter, 0, &dxgiOutputInterface);
+	hrRes = graphicsAdapter->lpVtbl->EnumOutputs(graphicsAdapter, 0, &dxgiOutputInterface);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_ENUM_OUTPUT;
 	}
 	
@@ -1316,7 +1627,7 @@ static int desktopDuplicationSetupDX11() {
 	IDXGIOutput6* dxgiOutput6Interface = NULL;
 	hrRes = dxgiOutputInterface->lpVtbl->QueryInterface(dxgiOutputInterface, &IID_IDXGIOutput6, (void**) &dxgiOutput6Interface);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_ENUM_OUTPUT;
 	}
 	dxgiOutputInterface->lpVtbl->Release(dxgiOutputInterface);
@@ -1324,7 +1635,7 @@ static int desktopDuplicationSetupDX11() {
 	DXGI_OUTPUT_DESC1 outputDescription; //Monitor Info
 	hrRes = dxgiOutput6Interface->lpVtbl->GetDesc1(dxgiOutput6Interface, &outputDescription);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_OUTPUT_DESC;
 	}
 	//uint64_t dpiWidth = outputDescription.DesktopCoordinates.right - outputDescription.DesktopCoordinates.left;
@@ -1344,7 +1655,7 @@ static int desktopDuplicationSetupDX11() {
 	};
 	hrRes = dxgiOutput6Interface->lpVtbl->DuplicateOutput1(dxgiOutput6Interface, (IUnknown*) desktopDuplicationDevice, 0, 7, outputFormats, &desktopDuplicationPtr);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_CREATE_OUTPUT_DUPLICATION;
 	}
 	dxgiOutput6Interface->lpVtbl->Release(dxgiOutput6Interface);
@@ -1380,7 +1691,7 @@ static int desktopDuplicationSetupDX11() {
 		hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr); //Releases resourceInterface ...?
 		if (hrRes != S_OK) {
 			if (hrRes != DXGI_ERROR_INVALID_CALL) {
-				desktopDuplicationExtraInfo = (int) hrRes;
+				graphicsError = hrRes;
 				return ERROR_DESKDUPL_RELEASE_FAILED;
 			}
 			//Frame already released
@@ -1389,7 +1700,7 @@ static int desktopDuplicationSetupDX11() {
 		hrRes = desktopDuplicationPtr->lpVtbl->AcquireNextFrame(desktopDuplicationPtr, desktopDuplicationAquireFrameTimeoutMS, &frameInfo, &resourceInterface);
 		if (hrRes != S_OK) {
 			if (hrRes != DXGI_ERROR_WAIT_TIMEOUT) {
-				desktopDuplicationExtraInfo = (int) hrRes;
+				graphicsError = hrRes;
 				return ERROR_DESKDUPL_ACQUIRE_FAILED;
 			}
 			aquireFrameTries--;
@@ -1409,7 +1720,7 @@ static int desktopDuplicationSetupDX11() {
 	ID3D11Texture2D* desktopDuplicationTexturePtr = NULL;
 	hrRes = resourceInterface->lpVtbl->QueryInterface(resourceInterface, &IID_ID3D11Texture2D, (void**) &desktopDuplicationTexturePtr);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_TEXTURE_QUERY;
 	}
 	
@@ -1453,14 +1764,14 @@ static int desktopDuplicationSetupDX11() {
 	IDXGIResource1* resource1Interface = NULL;
 	hrRes = resourceInterface->lpVtbl->QueryInterface(resourceInterface, &IID_IDXGIResource1, (void**) &resource1Interface);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_RESOURCE_QUERY;
 	}
 	
 	desktopDuplicationTextureHandle = NULL;
 	hrRes = resource1Interface->lpVtbl->CreateSharedHandle(resource1Interface, NULL, DXGI_SHARED_RESOURCE_READ, NULL, &desktopDuplicationTextureHandle);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_CREATE_SHARED_HANDLE;
 	}
 	resource1Interface->lpVtbl->Release(resource1Interface);
@@ -1473,21 +1784,13 @@ static int desktopDuplicationSetupDX11() {
 	
 	hrRes = desktopDuplicationTexturePtr->lpVtbl->QueryInterface(desktopDuplicationTexturePtr, &IID_IDXGIKeyedMutex, (void**) &desktopDuplicationKeyedMutex);
 	if (hrRes != S_OK) {
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_KEYEDMUTEX_QUERY;
 	}
 	
 	return 0;
 }
 
-
-#define VULKAN_ALLOCATOR NULL
-
-static VkResult vulkanExtraInfo = VK_SUCCESS;
-
-static VkInstance vulkanInstance = VK_NULL_HANDLE;
-static VkPhysicalDevice vulkanPhysicalDevice = VK_NULL_HANDLE;
-static VkDevice vulkanDevice = VK_NULL_HANDLE;
 static VkQueue vulkanComputeQueue = VK_NULL_HANDLE;
 
 static VkImage vulkanDuplicationTexturePtr = VK_NULL_HANDLE;
@@ -1518,39 +1821,19 @@ static VkFence vulkanComputeFence = VK_NULL_HANDLE;
 
 //Sets up Vulkan with compute and DirectX11 interfacing in mind
 static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData) {
-	//Create Vulkan Instance
-	VkApplicationInfo appInfo = {};
-	appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-	appInfo.pApplicationName = "Vulkan Compute Shader";
-	appInfo.applicationVersion = 1;
-	appInfo.pEngineName = "Vulkan Compute Engine";
-	appInfo.engineVersion = VK_MAKE_API_VERSION(1, 0, 0, 0);
-	appInfo.apiVersion = VK_API_VERSION_1_3;
-	
-	VkInstanceCreateInfo createInfo = {};
-	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-	createInfo.pApplicationInfo = &appInfo;
-	
-	createInfo.enabledLayerCount = 0; //Update this in future to use validation layers
-	
-	createInfo.enabledExtensionCount = 0; //2 for when its time to output vulkan texture to win32 surface //0 when not using graphics
-	const char* const extensions[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
-	createInfo.ppEnabledExtensionNames = extensions;
-	
-	VkResult result = vkCreateInstance(&createInfo, VULKAN_ALLOCATOR, &vulkanInstance);
-	if (result != VK_SUCCESS) {
-		vulkanExtraInfo = result;
-		return ERROR_VULKAN_CREATE_INSTANCE_FAILED;
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
 	}
 	
-	VkPhysicalDevice pDevices[32]; //256 Bytes: 32 * 8 (sizeof(VkPhysicalDevice))
-	uint32_t deviceCount = 32;
+	int error = vulkanCreateInstance();
+	RETURN_ON_ERROR(error);
+	
+	VkPhysicalDevice* pDevices = (VkPhysicalDevice*) ioTempBuffer;
+	uint32_t deviceCount = 32; //256 Bytes: 32 * 8 (sizeof(VkPhysicalDevice))
 	vkEnumeratePhysicalDevices(vulkanInstance, &deviceCount, pDevices);
 	if (deviceCount == 0) {
 		return ERROR_VULKAN_NO_PHYSICAL_DEVICES;
 	}
-	
-	
 	
 	VkPhysicalDeviceIDProperties devicePropertiesID;
 	devicePropertiesID.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
@@ -1560,6 +1843,7 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 	deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 	deviceProperties2.pNext = &devicePropertiesID;
 	
+	VkPhysicalDevice vulkanPhysicalDevice = VK_NULL_HANDLE;
 	for (uint32_t d = 0; d < deviceCount; d++) {
 		vkGetPhysicalDeviceProperties2(pDevices[d], &deviceProperties2);
 		
@@ -1567,8 +1851,8 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 			uint32_t* deviceUUID = (uint32_t*) &(devicePropertiesID.deviceLUID);
 			//consoleWriteLineWithNumberFast("UUID Low:  ", 11, deviceUUID[0], NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			//consoleWriteLineWithNumberFast("UUID High: ", 11, deviceUUID[1], NUM_FORMAT_PARTIAL_HEXADECIMAL);
-			if (deviceUUID[0] == desktopDuplicationAdapterID.LowPart) {
-				if (deviceUUID[1] == desktopDuplicationAdapterID.HighPart) {
+			if (deviceUUID[0] == graphicsAdapterID.LowPart) {
+				if (deviceUUID[1] == graphicsAdapterID.HighPart) {
 					vulkanPhysicalDevice = pDevices[d];
 					d = deviceCount; //break;
 				}
@@ -1587,8 +1871,8 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 	
 	//Find Vulkan Compute Queue Family Index (that includes graphics capabilities)
 	uint32_t computeQueueFamilyIndex = 256;
-	VkQueueFamilyProperties pQueueFamilyProperties[32]; //768 Bytes: 32 * 24 (sizeof(VkQueueFamilyProperties))
-	uint32_t queueFamilyCount = 32;
+	VkQueueFamilyProperties* pQueueFamilyProperties = (VkQueueFamilyProperties*) ioTempBuffer;
+	uint32_t queueFamilyCount = 32; //768 Bytes: 32 * 24 (sizeof(VkQueueFamilyProperties))
 	vkGetPhysicalDeviceQueueFamilyProperties(vulkanPhysicalDevice, &queueFamilyCount, pQueueFamilyProperties);
 	
 	//for (uint32_t q = 0; q < queueFamilyCount; q++) {
@@ -1645,7 +1929,7 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 	vkGetPhysicalDeviceFeatures(vulkanPhysicalDevice, &deviceFeatures);
 	deviceCreateInfo.pEnabledFeatures = &deviceFeatures;
 	
-	result = vkCreateDevice(vulkanPhysicalDevice, &deviceCreateInfo, VULKAN_ALLOCATOR, &vulkanDevice);
+	VkResult result = vkCreateDevice(vulkanPhysicalDevice, &deviceCreateInfo, VULKAN_ALLOCATOR, &vulkanDevice);
 	if (result != VK_SUCCESS) {
 		vulkanExtraInfo = result;
 		return ERROR_VULKAN_DEVICE_CREATION_FAILED;
@@ -2345,16 +2629,9 @@ static int desktopDuplicationSetupVulkan(size_t shaderSize, uint32_t* shaderData
 	return 0;
 }
 
-
-static int cuExtraInfo = CUDA_SUCCESS;
-
-static CUdevice cuDevice = 0;
-static CUcontext cuContext = 0;
 static CUexternalMemory cuExtMem = 0;
 static CUmipmappedArray cuExtMipArray = 0;
 static CUarray cuExtArray = 0;
-
-static int nvEncExtraInfo = NV_ENC_SUCCESS;
 
 static NV_ENCODE_API_FUNCTION_LIST nvEncFunList = {};
 static void* nvEncoder = NULL;
@@ -2363,154 +2640,12 @@ static NV_ENC_CREATE_BITSTREAM_BUFFER nvEncBitstreamBuff1 = {};
 static NV_ENC_PIC_PARAMS nvEncPicParams = {};
 
 static int desktopDuplicationSetupNvEnc() {
-	//Setup CUDA interface first
-	CUresult cuRes = cuInit(0);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_NO_INIT;
+	if (ioState != IO_STATE_SETUP) {
+		return ERROR_IO_WRONG_STATE;
 	}
 	
-	//Do CUDA Version check in future once knowing what to compare it to
-	int cudaVersion = 0;
-	cuRes = cuDriverGetVersion(&cudaVersion);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_GET_VERSION;
-	}
-	//consoleWriteLineWithNumberFast("Cuda Version: ", 14, (uint64_t) cudaVersion, NUM_FORMAT_UNSIGNED_INTEGER);
-	if (cudaVersion < 10000) {
-		return ERROR_CUDA_LOW_VERSION;
-	}
-	
-	
-	int numCudaDevices = 0;
-	cuRes = cuDeviceGetCount(&numCudaDevices);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_NO_DEVICES;
-	}
-	if (numCudaDevices == 0) {
-		return ERROR_CUDA_NO_DEVICES;
-	}
-	
-	//int cudaDeviceNum = 0;
-	for (int d=0; d<numCudaDevices; d++) {
-		cuRes = cuDeviceGet(&cuDevice, 0);
-		if (cuRes != CUDA_SUCCESS) {
-			cuExtraInfo = (int) cuRes;
-			return ERROR_CUDA_CANNOT_GET_DEVICE;
-		}
-		
-		char luid[16] = {};
-		unsigned int deviceNodeMask = 0;
-		cuRes = cuDeviceGetLuid(luid, &deviceNodeMask, cuDevice);
-		if (cuRes != CUDA_SUCCESS) {
-			cuExtraInfo = (int) cuRes;
-			return ERROR_CUDA_CANNOT_GET_DEVICE_LUID;
-		}
-		
-		uint32_t* luidConversion = (uint32_t*) luid;
-		//consoleWriteLineWithNumberFast("UUID Low:  ", 11, luidConversion[0], NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		//consoleWriteLineWithNumberFast("UUID High: ", 11, luidConversion[1], NUM_FORMAT_PARTIAL_HEXADECIMAL);
-		if (luidConversion[0] == desktopDuplicationAdapterID.LowPart) {
-			if (luidConversion[1] == desktopDuplicationAdapterID.HighPart) {
-				//cudaDeviceNum = d;
-				d = numCudaDevices; //break
-			}
-		}
-	}
-	
-	unsigned int cudaContexFlags = 0;
-	int cudaContexState = 0;
-	cuRes = cuDevicePrimaryCtxGetState(cuDevice, &cudaContexFlags, &cudaContexState);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_GET_CONTEXT_STATE;
-	}
-	//consoleWriteLineWithNumberFast("Context Flags: ", 15, cudaContexFlags, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	//consoleWriteLineWithNumberFast("Context State: ", 15, cudaContexState, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	if (cudaContexState == 1) {
-		consoleWriteLineFast("Warning: Cuda Possibly Active!", 30);
-	}
-	
-	//consoleWriteLineSlow("Cuda Device Init");
-	//consoleBufferFlush();
-	//consoleWaitForEnter();
-	
-	
-	//Get Cuda Context, can set flags with: cuDevicePrimaryCtxSetFlags() function
-	cuRes = cuDevicePrimaryCtxRetain(&cuContext, cuDevice);
-	//cuRes = cuCtxCreate(&cuContext, 0, cuDevice); //Doesn't have an effect
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_GET_CONTEXT;
-	}
-	
-	//consoleWriteLineSlow("Cuda Context Init");
-	//consoleBufferFlush();
-	//consoleWaitForEnter();
-	
-	cuRes = cuCtxPushCurrent(cuContext);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_PUSH_CONTEXT;
-	}
-	
-	size_t cudaBytes = 0;
-	//cuRes = cuCtxGetLimit(&cudaBytes, CU_LIMIT_STACK_SIZE);
-	//if (cuRes != CUDA_SUCCESS) {
-	//	cuExtraInfo = (int) cuRes;
-	//	return ERROR_CUDA_CANNOT_GET_LIMIT;
-	//}
-	//consoleWriteLineWithNumberFast("Cuda Limit: ", 12, cudaBytes, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	
-	cudaBytes = 0;
-	cuRes = cuCtxSetLimit(CU_LIMIT_STACK_SIZE, cudaBytes);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_SET_LIMIT;
-	}
-	cuRes = cuCtxSetLimit(CU_LIMIT_PRINTF_FIFO_SIZE, cudaBytes);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_SET_LIMIT;
-	}
-	cuRes = cuCtxSetLimit(CU_LIMIT_MALLOC_HEAP_SIZE, cudaBytes);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_SET_LIMIT;
-	}
-	//cuRes = cuCtxSetLimit(CU_LIMIT_DEV_RUNTIME_PENDING_LAUNCH_COUNT, cudaBytes);
-	//if (cuRes != CUDA_SUCCESS) {
-	//	cuExtraInfo = (int) cuRes;
-	//	return ERROR_CUDA_CANNOT_SET_LIMIT;
-	//}
-	cuRes = cuCtxSetLimit(CU_LIMIT_DEV_RUNTIME_SYNC_DEPTH, cudaBytes);
-	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
-		return ERROR_CUDA_CANNOT_SET_LIMIT;
-	}
-	
-	//cuRes = cuCtxGetLimit(&cudaBytes, CU_LIMIT_STACK_SIZE);
-	//if (cuRes != CUDA_SUCCESS) {
-	//	cuExtraInfo = (int) cuRes;
-	//	return ERROR_CUDA_CANNOT_GET_LIMIT;
-	//}
-	//consoleWriteLineWithNumberFast("Cuda Limit: ", 12, cudaBytes, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	
-	//size_t cudaFreeMem = 0;
-	//size_t cudaTotalMem = 0;
-	//cuRes = cuMemGetInfo(&cudaFreeMem, &cudaTotalMem);
-	//if (cuRes != CUDA_SUCCESS) {
-	//	return ERROR_NVENC_EXTRA_INFO;
-	//}
-	//consoleWriteLineWithNumberFast("Cuda Free:  ", 12, cudaFreeMem, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	//consoleWriteLineWithNumberFast("Cuda Total: ", 12, cudaTotalMem, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-	
-	//consoleWriteLineSlow("Cuda Context Modify");
-	//consoleBufferFlush();
-	//consoleWaitForEnter();
-	
+	int error = nvidiaSetupCuda();
+	RETURN_ON_ERROR(error);
 	
 	CUDA_EXTERNAL_MEMORY_HANDLE_DESC extMemHandle = {};
 	extMemHandle.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32;
@@ -2519,9 +2654,9 @@ static int desktopDuplicationSetupNvEnc() {
 	extMemHandle.size = vulkanMemGPUexportSize;
 	extMemHandle.flags = CUDA_EXTERNAL_MEMORY_DEDICATED; //correct based on vulkan property
 	
-	cuRes = cuImportExternalMemory(&cuExtMem, &extMemHandle);
+	CUresult cuRes = cuImportExternalMemory(&cuExtMem, &extMemHandle);
 	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
+		nvidiaError = (int) cuRes;
 		return ERROR_CUDA_CANNOT_IMPORT_MEMORY;
 	}
 	//consoleWriteLineWithNumberFast("Imported Mem: ", 14, (uint64_t) cuExtMem, NUM_FORMAT_FULL_HEXADECIMAL);
@@ -2538,19 +2673,19 @@ static int desktopDuplicationSetupNvEnc() {
 	
 	cuRes = cuExternalMemoryGetMappedMipmappedArray(&cuExtMipArray, cuExtMem, &extMemArray);
 	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
+		nvidiaError = (int) cuRes;
 		return ERROR_CUDA_CANNOT_MAP_MEMORY;
 	}
 	
 	cuRes = cuMipmappedArrayGetLevel(&cuExtArray, cuExtMipArray, 0);
 	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
+		nvidiaError = (int) cuRes;
 		return ERROR_CUDA_CANNOT_GET_ARRAY;
 	}
 	
 	cuRes = cuCtxPopCurrent(NULL);
 	if (cuRes != CUDA_SUCCESS) {
-		cuExtraInfo = (int) cuRes;
+		nvidiaError = (int) cuRes;
 		return ERROR_CUDA_CANNOT_POP_CONTEXT;
 	}
 	
@@ -2564,28 +2699,31 @@ static int desktopDuplicationSetupNvEnc() {
 	nvEncFunList.reserved = 0;
 	NVENCSTATUS nvEncRes = NvEncodeAPICreateInstance(&nvEncFunList);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_CREATE_INSTANCE;
 	}
 	
-	NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS nvEncSessionParams = {};
-	nvEncSessionParams.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-	nvEncSessionParams.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
-	nvEncSessionParams.device = (void*) cuContext;
-	nvEncSessionParams.apiVersion = NVENCAPI_VERSION;
 	
-	nvEncRes = nvEncFunList.nvEncOpenEncodeSessionEx(&nvEncSessionParams, &nvEncoder);
+	NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS* nvEncSessionParams = (NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS*) ioTempBuffer;
+	memzeroBasic((void*) nvEncSessionParams, sizeof(NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS));
+	
+	nvEncSessionParams->version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
+	nvEncSessionParams->deviceType = NV_ENC_DEVICE_TYPE_CUDA;
+	nvEncSessionParams->device = (void*) nvidiaCudaContext;
+	nvEncSessionParams->apiVersion = NVENCAPI_VERSION;
+	
+	nvEncRes = nvEncFunList.nvEncOpenEncodeSessionEx(nvEncSessionParams, &nvEncoder);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_OPEN_SESSION;
 	}
 	
 	
-	GUID nvEncGUIDs[32]; //32 is enough for all possible GUIDs for now
-	uint32_t nvEncGUIDcount = 0;
+	GUID* nvEncGUIDs = (GUID*) ioTempBuffer;
+	uint32_t nvEncGUIDcount = 0; //512 bytes = 32 * 16 since 32 is enough for all possible GUIDs for now
 	nvEncRes = nvEncFunList.nvEncGetEncodeGUIDs(nvEncoder, nvEncGUIDs, 32, &nvEncGUIDcount);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_GET_ENCODE_GUIDS;
 	}
 	//consoleWriteLineWithNumberFast("Number: ", 8, nvEncGUIDcount, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -2614,7 +2752,7 @@ static int desktopDuplicationSetupNvEnc() {
 	uint32_t nvEncProfiles = 0;
 	nvEncRes = nvEncFunList.nvEncGetEncodeProfileGUIDs(nvEncoder, nvEncChosenGUID, nvEncGUIDs, 32, &nvEncProfiles);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_GET_ENCODE_PROFILES;
 	}
 	//consoleWriteLineWithNumberFast("Number: ", 8, nvEncProfiles, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -2643,7 +2781,7 @@ static int desktopDuplicationSetupNvEnc() {
 	uint32_t nvEncPresets = 0;
 	nvEncRes = nvEncFunList.nvEncGetEncodePresetGUIDs(nvEncoder, nvEncChosenGUID, nvEncGUIDs, 32, &nvEncPresets);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_GET_ENCODE_PRESETS;
 	}
 	//consoleWriteLineWithNumberFast("Number: ", 8, nvEncPresets, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -2668,21 +2806,25 @@ static int desktopDuplicationSetupNvEnc() {
 		return ERROR_NVENC_NO_PRESET;
 	}
 	
-	NV_ENC_PRESET_CONFIG nvPresetConfig = {};
-	nvPresetConfig.version = NV_ENC_PRESET_CONFIG_VER;
-	nvPresetConfig.presetCfg.version = NV_ENC_CONFIG_VER;
-	nvEncRes = nvEncFunList.nvEncGetEncodePresetConfigEx(nvEncoder, nvEncChosenGUID, nvEncPresetGUID, NV_ENC_TUNING_INFO_LOSSLESS, &nvPresetConfig);
+	//consoleWriteLineWithNumberFast("Size of: ", 9, sizeof(NV_ENC_PRESET_CONFIG), NUM_FORMAT_UNSIGNED_INTEGER);
+	void* presetConfigBuffer = NULL;
+	error = memoryAllocate(&presetConfigBuffer, sizeof(NV_ENC_PRESET_CONFIG), 0);
+	RETURN_ON_ERROR(error);
+	NV_ENC_PRESET_CONFIG* nvPresetConfig = (NV_ENC_PRESET_CONFIG*) presetConfigBuffer;
+	nvPresetConfig->version = NV_ENC_PRESET_CONFIG_VER;
+	nvPresetConfig->presetCfg.version = NV_ENC_CONFIG_VER;
+	nvEncRes = nvEncFunList.nvEncGetEncodePresetConfigEx(nvEncoder, nvEncChosenGUID, nvEncPresetGUID, NV_ENC_TUNING_INFO_LOSSLESS, nvPresetConfig);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_GET_PRESET_CONFIG;
 	}	
 	
 	
-	NV_ENC_BUFFER_FORMAT nvEncInFmts[16]; //16 should be enough for all formats
-	uint32_t nvEncInFmtCount = 0;
+	NV_ENC_BUFFER_FORMAT* nvEncInFmts = (NV_ENC_BUFFER_FORMAT*) ioTempBuffer;
+	uint32_t nvEncInFmtCount = 0; //128 bytes = 16 * 8 bytes should be enough for all formats
 	nvEncRes = nvEncFunList.nvEncGetInputFormats(nvEncoder, nvEncChosenGUID, nvEncInFmts, 16, &nvEncInFmtCount);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_GET_INPUT_FORMATS;
 	}
 	//consoleWriteLineWithNumberFast("Number: ", 8, nvEncInFmts, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -2699,13 +2841,14 @@ static int desktopDuplicationSetupNvEnc() {
 		return ERROR_NVENC_NO_LOSSLESS_INPUT_FORMAT;
 	}
 	
-	NV_ENC_CAPS_PARAM nvEncCapability = {};
-	nvEncCapability.version = NV_ENC_CAPS_PARAM_VER;
-	nvEncCapability.capsToQuery = NV_ENC_CAPS_NUM_MAX_BFRAMES;
+	NV_ENC_CAPS_PARAM* nvEncCapability = (NV_ENC_CAPS_PARAM*) ioTempBuffer;
+	memzeroBasic((void*) nvEncCapability, sizeof(NV_ENC_CAPS_PARAM));
+	nvEncCapability->version = NV_ENC_CAPS_PARAM_VER;
+	nvEncCapability->capsToQuery = NV_ENC_CAPS_NUM_MAX_BFRAMES;
 	int nvEncCapsVal = 0;
-	nvEncRes = nvEncFunList.nvEncGetEncodeCaps(nvEncoder, nvEncChosenGUID, &nvEncCapability, &nvEncCapsVal);
+	nvEncRes = nvEncFunList.nvEncGetEncodeCaps(nvEncoder, nvEncChosenGUID, nvEncCapability, &nvEncCapsVal);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_GET_CAPABILITY;
 	}
 	//consoleWriteLineWithNumberFast("Max B-Frames: ", 14, nvEncCapsVal, NUM_FORMAT_UNSIGNED_INTEGER);
@@ -2714,131 +2857,137 @@ static int desktopDuplicationSetupNvEnc() {
 	//consoleBufferFlush();
 	//consoleWaitForEnter();
 	
+	//consoleWriteLineWithNumberFast("Size of: ", 9, sizeof(NV_ENC_INITIALIZE_PARAMS), NUM_FORMAT_UNSIGNED_INTEGER);
+	NV_ENC_INITIALIZE_PARAMS* nvEncParams = (NV_ENC_INITIALIZE_PARAMS*) ioTempBuffer;
+	memzeroBasic((void*) nvEncParams, sizeof(NV_ENC_INITIALIZE_PARAMS));
 	
-	NV_ENC_INITIALIZE_PARAMS nvEncParams = {0}; //Expects things to be set to 0
-	nvEncParams.version = NV_ENC_INITIALIZE_PARAMS_VER;
-	nvEncParams.encodeGUID.Data1 = nvEncChosenGUID.Data1;
-	nvEncParams.encodeGUID.Data2 = nvEncChosenGUID.Data2;
-	nvEncParams.encodeGUID.Data3 = nvEncChosenGUID.Data3;
-	nvEncParams.presetGUID.Data1 = nvEncPresetGUID.Data1;
-	nvEncParams.presetGUID.Data2 = nvEncPresetGUID.Data2;
-	nvEncParams.presetGUID.Data3 = nvEncPresetGUID.Data3;
+	nvEncParams->version = NV_ENC_INITIALIZE_PARAMS_VER;
+	nvEncParams->encodeGUID.Data1 = nvEncChosenGUID.Data1;
+	nvEncParams->encodeGUID.Data2 = nvEncChosenGUID.Data2;
+	nvEncParams->encodeGUID.Data3 = nvEncChosenGUID.Data3;
+	nvEncParams->presetGUID.Data1 = nvEncPresetGUID.Data1;
+	nvEncParams->presetGUID.Data2 = nvEncPresetGUID.Data2;
+	nvEncParams->presetGUID.Data3 = nvEncPresetGUID.Data3;
 	for (uint32_t d=0; d<8; d++) {
-		nvEncParams.encodeGUID.Data4[d] = nvEncChosenGUID.Data4[d];
-		nvEncParams.presetGUID.Data4[d] = nvEncPresetGUID.Data4[d];
+		nvEncParams->encodeGUID.Data4[d] = nvEncChosenGUID.Data4[d];
+		nvEncParams->presetGUID.Data4[d] = nvEncPresetGUID.Data4[d];
 	}
-	nvEncParams.encodeWidth = desktopDuplicationWidth;
-	nvEncParams.encodeHeight = desktopDuplicationHeight;
+	nvEncParams->encodeWidth = desktopDuplicationWidth;
+	nvEncParams->encodeHeight = desktopDuplicationHeight;
 	uint32_t gcd = greatestCommonDivisor(desktopDuplicationWidth, desktopDuplicationHeight);
-	nvEncParams.darWidth = desktopDuplicationWidth / gcd; //16;
-	nvEncParams.darHeight = desktopDuplicationHeight / gcd; //9;
+	nvEncParams->darWidth = desktopDuplicationWidth / gcd; //16;
+	nvEncParams->darHeight = desktopDuplicationHeight / gcd; //9;
 	
-	//consoleWriteLineWithNumberFast("DAR Width:  ", 12, nvEncParams.darWidth, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("DAR Height: ", 12, nvEncParams.darHeight, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("DAR Width:  ", 12, nvEncParams->darWidth, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("DAR Height: ", 12, nvEncParams->darHeight, NUM_FORMAT_UNSIGNED_INTEGER);
 	
 	
-	nvEncParams.frameRateNum = 60;
-	nvEncParams.frameRateDen = 1;
-	nvEncParams.enableEncodeAsync = 0; //Lots more work to enable Async and probably not worth it
-	nvEncParams.enablePTD = 1; //Enabling the picture type decision to be made by the encoder
-	nvEncParams.reportSliceOffsets = 0;
-	nvEncParams.enableSubFrameWrite = 0;
-	nvEncParams.enableExternalMEHints = 0;
-	nvEncParams.enableMEOnlyMode = 0;
-	nvEncParams.enableWeightedPrediction = 0;
-	nvEncParams.splitEncodeMode = 0; //Not certain
-	nvEncParams.enableOutputInVidmem = 0;
-	nvEncParams.enableReconFrameOutput = 0;
-	nvEncParams.enableOutputStats = 0;
-	nvEncParams.reservedBitFields = 0;
-	nvEncParams.privDataSize = 0;
-	nvEncParams.privData = NULL;
-	nvEncParams.privDataSize = 0;
+	nvEncParams->frameRateNum = 60;
+	nvEncParams->frameRateDen = 1;
+	nvEncParams->enableEncodeAsync = 0; //Lots more work to enable Async and probably not worth it
+	nvEncParams->enablePTD = 1; //Enabling the picture type decision to be made by the encoder
+	nvEncParams->reportSliceOffsets = 0;
+	nvEncParams->enableSubFrameWrite = 0;
+	nvEncParams->enableExternalMEHints = 0;
+	nvEncParams->enableMEOnlyMode = 0;
+	nvEncParams->enableWeightedPrediction = 0;
+	nvEncParams->splitEncodeMode = 0; //Not certain
+	nvEncParams->enableOutputInVidmem = 0;
+	nvEncParams->enableReconFrameOutput = 0;
+	nvEncParams->enableOutputStats = 0;
+	nvEncParams->reservedBitFields = 0;
+	nvEncParams->privDataSize = 0;
+	nvEncParams->privData = NULL;
+	nvEncParams->privDataSize = 0;
 	
 	
 	//Manual Adjust of Preset Parameters
-	nvPresetConfig.presetCfg.profileGUID.Data1 = nvEncProfileGUID.Data1;
-	nvPresetConfig.presetCfg.profileGUID.Data2 = nvEncProfileGUID.Data2;
-	nvPresetConfig.presetCfg.profileGUID.Data3 = nvEncProfileGUID.Data3;
+	nvPresetConfig->presetCfg.profileGUID.Data1 = nvEncProfileGUID.Data1;
+	nvPresetConfig->presetCfg.profileGUID.Data2 = nvEncProfileGUID.Data2;
+	nvPresetConfig->presetCfg.profileGUID.Data3 = nvEncProfileGUID.Data3;
 	for (uint32_t d=0; d<8; d++) {
-		nvPresetConfig.presetCfg.profileGUID.Data4[d] = nvEncProfileGUID.Data4[d];
+		nvPresetConfig->presetCfg.profileGUID.Data4[d] = nvEncProfileGUID.Data4[d];
 	}
 	
-	//consoleWriteLineWithNumberFast("Rate Control: ", 14, nvPresetConfig.presetCfg.gopLength, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("Rate Control: ", 14, nvPresetConfig.presetCfg.frameIntervalP, NUM_FORMAT_UNSIGNED_INTEGER);
-	nvPresetConfig.presetCfg.gopLength = NVENC_INFINITE_GOPLENGTH; //For realtime encoding
-	nvPresetConfig.presetCfg.frameIntervalP = 1;
+	//consoleWriteLineWithNumberFast("Rate Control: ", 14, nvPresetConfig->presetCfg.gopLength, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("Rate Control: ", 14, nvPresetConfig->presetCfg.frameIntervalP, NUM_FORMAT_UNSIGNED_INTEGER);
+	nvPresetConfig->presetCfg.gopLength = NVENC_INFINITE_GOPLENGTH; //For realtime encoding
+	nvPresetConfig->presetCfg.frameIntervalP = 1;
 	
-	//nvPresetConfig.presetCfg.monoChromeEncoding = 0;
-	//nvPresetConfig.presetCfg.frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
-	//nvPresetConfig.presetCfg.mvPrecision = NV_ENC_MV_PRECISION_DEFAULT;
+	//nvPresetConfig->presetCfg.monoChromeEncoding = 0;
+	//nvPresetConfig->presetCfg.frameFieldMode = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
+	//nvPresetConfig->presetCfg.mvPrecision = NV_ENC_MV_PRECISION_DEFAULT;
 	
-	nvEncParams.encodeConfig = &nvPresetConfig.presetCfg;
-	//consoleWriteLineWithNumberFast("Rate Control: ", 14, nvPresetConfig.presetCfg.rcParams.rateControlMode, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("AQ Enable: ", 11, nvPresetConfig.presetCfg.rcParams.enableAQ, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("Low Delay: ", 11, nvPresetConfig.presetCfg.rcParams.lowDelayKeyFrameScale, NUM_FORMAT_UNSIGNED_INTEGER);
+	nvEncParams->encodeConfig = &(nvPresetConfig->presetCfg);
+	//consoleWriteLineWithNumberFast("Rate Control: ", 14, nvPresetConfig->presetCfg.rcParams.rateControlMode, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("AQ Enable: ", 11, nvPresetConfig->presetCfg.rcParams.enableAQ, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("Low Delay: ", 11, nvPresetConfig->presetCfg.rcParams.lowDelayKeyFrameScale, NUM_FORMAT_UNSIGNED_INTEGER);
 	
-	//consoleWriteLineWithNumberFast("SPSPPS Disable: ", 16, nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.disableSPSPPS, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("SPSPPS Repeat:  ", 16, nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.repeatSPSPPS, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("Enable Intra:   ", 16, nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.enableIntraRefresh, NUM_FORMAT_UNSIGNED_INTEGER);
-	//consoleWriteLineWithNumberFast("Intra Period:   ", 16, nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.intraRefreshPeriod, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("SPSPPS Disable: ", 16, nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.disableSPSPPS, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("SPSPPS Repeat:  ", 16, nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.repeatSPSPPS, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("Enable Intra:   ", 16, nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.enableIntraRefresh, NUM_FORMAT_UNSIGNED_INTEGER);
+	//consoleWriteLineWithNumberFast("Intra Period:   ", 16, nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.intraRefreshPeriod, NUM_FORMAT_UNSIGNED_INTEGER);
 	
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.chromaFormatIDC = 3; //1 for 4:2:0, 3 for 4:4:4 Makes it lossless
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.pixelBitDepthMinus8 = 2;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.chromaFormatIDC = 3; //1 for 4:2:0, 3 for 4:4:4 Makes it lossless
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.pixelBitDepthMinus8 = 2;
 	
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoSignalTypePresentFlag = 1;
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_COMPONENT; //?
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.colourDescriptionPresentFlag = 1;
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
-	nvPresetConfig.presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoSignalTypePresentFlag = 1;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_COMPONENT; //?
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.colourDescriptionPresentFlag = 1;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709;
+	nvPresetConfig->presetCfg.encodeCodecConfig.hevcConfig.hevcVUIParameters.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
 	
 	
-	nvEncParams.maxEncodeWidth = desktopDuplicationWidth; //0?
-	nvEncParams.maxEncodeHeight = desktopDuplicationHeight; //0?
+	nvEncParams->maxEncodeWidth = desktopDuplicationWidth; //0?
+	nvEncParams->maxEncodeHeight = desktopDuplicationHeight; //0?
 	
-	nvEncParams.tuningInfo = NV_ENC_TUNING_INFO_LOSSLESS;
-	nvEncParams.bufferFormat = nvEncChosenFormat; //Only used when device is DX12
+	nvEncParams->tuningInfo = NV_ENC_TUNING_INFO_LOSSLESS;
+	nvEncParams->bufferFormat = nvEncChosenFormat; //Only used when device is DX12
 	
-	nvEncRes = nvEncFunList.nvEncInitializeEncoder(nvEncoder, &nvEncParams);
+	nvEncRes = nvEncFunList.nvEncInitializeEncoder(nvEncoder, nvEncParams);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_INITIALIZE;
 	}
+	
+	error = memoryDeallocate(&presetConfigBuffer);
+	RETURN_ON_ERROR(error);
 	
 	//consoleWriteLineSlow("Nvidia Init Encoder");
 	//consoleBufferFlush();
 	//consoleWaitForEnter();
 	
-	NV_ENC_REGISTER_RESOURCE nvEncInputResource = {0};
-	nvEncInputResource.version = NV_ENC_REGISTER_RESOURCE_VER;
-	nvEncInputResource.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDAARRAY;
-	nvEncInputResource.width = desktopDuplicationWidth;
-	nvEncInputResource.height = desktopDuplicationHeight;
-	nvEncInputResource.pitch = desktopDuplicationWidth * 2;
+	NV_ENC_REGISTER_RESOURCE* nvEncInputResource = (NV_ENC_REGISTER_RESOURCE*) ioTempBuffer;
+	memzeroBasic((void*) nvEncInputResource, sizeof(NV_ENC_REGISTER_RESOURCE));
+	nvEncInputResource->version = NV_ENC_REGISTER_RESOURCE_VER;
+	nvEncInputResource->resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDAARRAY;
+	nvEncInputResource->width = desktopDuplicationWidth;
+	nvEncInputResource->height = desktopDuplicationHeight;
+	nvEncInputResource->pitch = desktopDuplicationWidth * 2;
 	
-	nvEncInputResource.subResourceIndex = 0; //0 for CUDA
-	nvEncInputResource.resourceToRegister = (void*) cuExtArray;
+	nvEncInputResource->subResourceIndex = 0; //0 for CUDA
+	nvEncInputResource->resourceToRegister = (void*) cuExtArray;
 	
-	nvEncInputResource.bufferFormat = nvEncChosenFormat;
-	nvEncInputResource.bufferUsage = NV_ENC_INPUT_IMAGE;
+	nvEncInputResource->bufferFormat = nvEncChosenFormat;
+	nvEncInputResource->bufferUsage = NV_ENC_INPUT_IMAGE;
 	
-	nvEncInputResource.pInputFencePoint = NULL; //Used for DX12
+	nvEncInputResource->pInputFencePoint = NULL; //Used for DX12
 	
-	nvEncRes = nvEncFunList.nvEncRegisterResource(nvEncoder, &nvEncInputResource);
+	nvEncRes = nvEncFunList.nvEncRegisterResource(nvEncoder, nvEncInputResource);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_REGISTER_RES;
 	}
 	
 	NV_ENC_MAP_INPUT_RESOURCE nvEncMappedInput = {0};
 	nvEncMappedInput.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
-	nvEncMappedInput.registeredResource = nvEncInputResource.registeredResource;
+	nvEncMappedInput.registeredResource = nvEncInputResource->registeredResource;
 	
 	nvEncRes = nvEncFunList.nvEncMapInputResource(nvEncoder, &nvEncMappedInput);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_MAP_RES;
 	}
 	
@@ -2852,28 +3001,28 @@ static int desktopDuplicationSetupNvEnc() {
 	nvEncBitstreamBuff0.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
 	nvEncRes = nvEncFunList.nvEncCreateBitstreamBuffer(nvEncoder, &nvEncBitstreamBuff0);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_CREATE_BITSTREAM;
 	}
 	
 	//Extra safe
 	nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff0.bitstreamBuffer);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_UNLOCK_BITSTREAM;
 	}
 	
 	nvEncBitstreamBuff1.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
 	nvEncRes = nvEncFunList.nvEncCreateBitstreamBuffer(nvEncoder, &nvEncBitstreamBuff1);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_CREATE_BITSTREAM;
 	}
 	
 	//Extra safe
 	nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff1.bitstreamBuffer);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = (int) nvEncRes;
+		nvidiaError = (int) nvEncRes;
 		return ERROR_NVENC_CANNOT_UNLOCK_BITSTREAM;
 	}
 	
@@ -3026,7 +3175,7 @@ int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	//NvEnc Run
 	NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = nvEncRes;
+		nvidiaError = nvEncRes;
 		return ERROR_NVENC_EXTRA_INFO;
 	}
 	
@@ -3040,7 +3189,7 @@ int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	
 	nvEncRes = nvEncFunList.nvEncLockBitstream(nvEncoder, &nvEncBitstreamLock);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = nvEncRes;
+		nvidiaError = nvEncRes;
 		return ERROR_NVENC_EXTRA_INFO;
 	}
 	
@@ -3049,7 +3198,7 @@ int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr) {
 	
 	nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff0.bitstreamBuffer);
 	if (nvEncRes != NV_ENC_SUCCESS) {
-		nvEncExtraInfo = nvEncRes;
+		nvidiaError = nvEncRes;
 		return ERROR_NVENC_EXTRA_INFO;
 	}
 	
@@ -3136,7 +3285,7 @@ int desktopDuplicationStart(uint64_t fps) {
 	HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
 	if (hrRes != S_OK) {
 		if (hrRes != DXGI_ERROR_INVALID_CALL) {
-			desktopDuplicationExtraInfo = (int) hrRes;
+			graphicsError = hrRes;
 			return ERROR_DESKDUPL_RELEASE_FAILED;
 		}
 		//Frame already released
@@ -3240,7 +3389,7 @@ int desktopDuplicationStart(uint64_t fps) {
 		//}
 	}
 	else if (hrRes != DXGI_ERROR_WAIT_TIMEOUT) { //Something happened
-		desktopDuplicationExtraInfo = (int) hrRes;
+		graphicsError = hrRes;
 		return ERROR_DESKDUPL_ACQUIRE_FAILED;
 	}
 	
@@ -3312,6 +3461,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 							if ((ddState & 0b110000) > 0) {
 								ddMiscIssues++;
 							}
+							ddRepeatCount++;
 							ddState |= 16 | 32;
 							ddState &= ~64;
 						}
@@ -3320,14 +3470,14 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 						hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
 						if (hrRes != S_OK) {
 							if (hrRes != DXGI_ERROR_INVALID_CALL) {
-								desktopDuplicationExtraInfo = (int) hrRes;
+								graphicsError = hrRes;
 								return ERROR_DESKDUPL_RELEASE_FAILED;
 							}
 						}
 					}
 				}
 				else if (hrRes != DXGI_ERROR_WAIT_TIMEOUT) { //Failed to acquire next frame but not to timeout
-					desktopDuplicationExtraInfo = (int) hrRes;
+					graphicsError = hrRes;
 					return ERROR_DESKDUPL_ACQUIRE_FAILED;
 				}
 			}
@@ -3342,6 +3492,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 					if ((ddState & 16) > 0) {
 						ddMiscIssues++;
 					}
+					ddRepeatCount++;
 					ddState |= 16;
 				}
 			}
@@ -3355,7 +3506,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 		if (waitRes == 0) { //Write Event Signaled
 			NVENCSTATUS nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff0.bitstreamBuffer);
 			if (nvEncRes != NV_ENC_SUCCESS) {
-				nvEncExtraInfo = nvEncRes;
+				nvidiaError = nvEncRes;
 				return ERROR_NVENC_EXTRA_INFO;
 			}
 			(*frameWriteCount)++;
@@ -3371,7 +3522,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 		if (waitRes == 0) { //Write Event Signaled
 			NVENCSTATUS nvEncRes = nvEncFunList.nvEncUnlockBitstream(nvEncoder, nvEncBitstreamBuff1.bitstreamBuffer);
 			if (nvEncRes != NV_ENC_SUCCESS) {
-				nvEncExtraInfo = nvEncRes;
+				nvidiaError = nvEncRes;
 				return ERROR_NVENC_EXTRA_INFO;
 			}
 			(*frameWriteCount)++;
@@ -3430,7 +3581,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 			HRESULT hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
 			if (hrRes != S_OK) {
 				if (hrRes != DXGI_ERROR_INVALID_CALL) {
-					desktopDuplicationExtraInfo = (int) hrRes;
+					graphicsError = hrRes;
 					return ERROR_DESKDUPL_RELEASE_FAILED;
 				}
 			}
@@ -3471,7 +3622,7 @@ int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount) {
 			
 			NVENCSTATUS nvEncRes = nvEncFunList.nvEncEncodePicture(nvEncoder, &nvEncPicParams);
 			if (nvEncRes != NV_ENC_SUCCESS) {
-				nvEncExtraInfo = nvEncRes;
+				nvidiaError = nvEncRes;
 				return ERROR_NVENC_EXTRA_INFO;
 			}
 			BOOL setRes = SetEvent(ddEncodeEvent);
@@ -3545,7 +3696,7 @@ int desktopDuplicationGetFrame() {
 	hrRes = desktopDuplicationPtr->lpVtbl->ReleaseFrame(desktopDuplicationPtr);
 	if (hrRes != S_OK) {
 		if (hrRes != DXGI_ERROR_INVALID_CALL) {
-			desktopDuplicationExtraInfo = (int) hrRes;
+			graphicsError = hrRes;
 			return ERROR_DESKDUPL_RELEASE_FAILED;
 		}
 		//Frame already released
@@ -3591,17 +3742,9 @@ int desktopDuplicationCleanup() {
 	return 0;
 }
 
-void desktopDuplicationGetError(int* error) {
-	*error = desktopDuplicationExtraInfo;
-}
 
-void vulkanGetError(int* error) {
-	*error = vulkanExtraInfo;
-}
 
-void nvidiaGetError(int* error) {
-	*error = nvEncExtraInfo;
-}
+
 
 
 //Assumes that computer operates with little-endianess (reasonable assumption)

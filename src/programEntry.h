@@ -74,16 +74,16 @@ void programEntry() {
 				compatibilityGetExtraError(&error);
 				consolePrintLineWithNumber(2, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
+			else if ((error >= ERROR_DESKDUPL_CREATE_FACTORY) && (error <= ERROR_DESKDUPL_KEYEDMUTEX_QUERY)) {
+				compatibilityGraphicsGetError(&error);
+				consolePrintLineWithNumber(5, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+			}
 			else if ((error >= ERROR_VULKAN_EXTRA_INFO) && (error <= ERROR_VULKAN_TBD)) {
 				vulkanGetError(&error);
-				consolePrintLineWithNumber(5, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+				consolePrintLineWithNumber(6, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
 			else if ((error >= ERROR_NETWORK_WRONG_STATE) && (error <= ERROR_NETWORK_TBD)) {
 				compatibilityGetNetworkError(&error);
-				consolePrintLineWithNumber(6, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-			}
-			else if ((error >= ERROR_DESKDUPL_CREATE_FACTORY) && (error <= ERROR_DESKDUPL_KEYEDMUTEX_QUERY)) {
-				desktopDuplicationGetError(&error);
 				consolePrintLineWithNumber(7, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
 			else if ((error >= ERROR_CUDA_NO_INIT) && (error <= ERROR_NVENC_TBD)) {
