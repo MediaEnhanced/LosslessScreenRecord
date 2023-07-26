@@ -23,8 +23,8 @@
 #include "compatibility.h" 
 
 //Make these assembly in the future
-void* memcpyBasic(void* dest, const void* src, size_t count) {
-	uint64_t count8 = (uint64_t) (count >> 3);
+void* memcpyBasic(void* dest, const void* src, uint64_t count) {
+	uint64_t count8 = count >> 3;
 	
 	uint64_t* destCpy8 = (uint64_t*) dest;
 	uint64_t* srcCpy8 = (uint64_t*) src;
@@ -48,8 +48,8 @@ void* memcpyBasic(void* dest, const void* src, size_t count) {
 	return dest;
 }
 
-void* memzeroBasic(void* ptr, size_t size) {
-	uint64_t count8 = (uint64_t) (size >> 3);
+void* memzeroBasic(void* ptr, uint64_t size) {
+	uint64_t count8 = size >> 3;
 	uint64_t* destZero8 = (uint64_t*) ptr;
 	for (uint64_t c8=0; c8<count8; c8++) {
 		destZero8[c8] = 0;
@@ -63,4 +63,6 @@ void* memzeroBasic(void* ptr, size_t size) {
 	
 	return ptr;
 }
+
+
 

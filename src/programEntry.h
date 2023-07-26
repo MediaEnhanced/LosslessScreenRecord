@@ -33,6 +33,7 @@ int programMain();
 // Calls the main function and exits under all conditions properly
 void programEntry() {
 	int error = compatibilitySetup();
+	//consoleWaitForEnter();
 	if (error == 0) {
 		consolePrintLine(4);
 		uint64_t startTime = getCurrentTime();
@@ -74,22 +75,26 @@ void programEntry() {
 				compatibilityGetExtraError(&error);
 				consolePrintLineWithNumber(2, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
+			#ifndef COMPATIBILITY_GRAPHICS_UNNEEDED
 			else if ((error >= ERROR_DESKDUPL_CREATE_FACTORY) && (error <= ERROR_DESKDUPL_KEYEDMUTEX_QUERY)) {
-				compatibilityGraphicsGetError(&error);
+				graphicsGetError(&error);
 				consolePrintLineWithNumber(5, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
 			else if ((error >= ERROR_VULKAN_EXTRA_INFO) && (error <= ERROR_VULKAN_TBD)) {
 				vulkanGetError(&error);
 				consolePrintLineWithNumber(6, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
-			else if ((error >= ERROR_NETWORK_WRONG_STATE) && (error <= ERROR_NETWORK_TBD)) {
-				compatibilityGetNetworkError(&error);
-				consolePrintLineWithNumber(7, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
-			}
 			else if ((error >= ERROR_CUDA_NO_INIT) && (error <= ERROR_NVENC_TBD)) {
 				nvidiaGetError(&error);
-				consolePrintLineWithNumber(8, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+				consolePrintLineWithNumber(7, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
 			}
+			#endif
+			#ifndef COMPATIBILITY_NETWORK_UNNEEDED
+			else if ((error >= ERROR_NETWORK_WRONG_STATE) && (error <= ERROR_NETWORK_TBD)) {
+				compatibilityGetNetworkError(&error);
+				consolePrintLineWithNumber(10, error, NUM_FORMAT_PARTIAL_HEXADECIMAL);
+			}
+			#endif
 		}
 		consoleBufferFlush();
 	}

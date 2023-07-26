@@ -33,6 +33,7 @@
 #include <stdint.h>	//Defines Data Types: https://en.wikipedia.org/wiki/C_data_types
 
 #define RETURN_ON_ERROR(error) ({if (error != 0) { return error; }})
+//#define RETURN_ON_ERROR_EXTRA(error, extra,) ({if (error != 0) { return error; }})
 
 //The Microsoft x64 calling convention is used in all of the assembly functions:
 //https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention?view=msvc-170 
@@ -46,8 +47,8 @@ uint64_t ASM_CALLING_CONVENTION numToUDecStr(char* strPtr, uint64_t number);
 uint64_t ASM_CALLING_CONVENTION shortToDecStr(char* strPtr, uint64_t number);
 
 //Common Compatibility Functions: Implemented in compatibility.c
-void* memcpyBasic(void* dest, const void* src, size_t count);
-void* memzeroBasic(void* ptr, size_t size);
+void* memcpyBasic(void* dest, const void* src, uint64_t count);
+void* memzeroBasic(void* ptr, uint64_t size);
 
 //Non Common Misc Functions:
 void compatibilityExit(int returnError);
@@ -66,7 +67,8 @@ uint64_t getDiffTimeMilliseconds(uint64_t startTime, uint64_t endTime);
 uint64_t getDiffTimeSeconds(uint64_t startTime, uint64_t endTime);
 uint64_t getEndTimeFromMicroDiff(uint64_t startTime, uint64_t usDiff);
 uint64_t getEndTimeFromMilliDiff(uint64_t startTime, uint64_t msDiff);
-
+uint64_t getFrameIntervalTime(uint64_t fps);
+uint64_t getMicrosecondDivider();
 uint64_t getTimestampNTP();
 uint64_t getTimestamp100us();
 
@@ -108,6 +110,7 @@ int consoleWriteLineSlow(char* strUTF8);
 int consoleWriteWithNumber(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat, uint64_t conExtraInfo);
 void consoleWriteLineWithNumberFast(char* strUTF8, uint64_t strBytes, uint64_t number, uint64_t numberFormat);
 int consoleControl(uint64_t conInstruction, uint64_t conExtraValue);
+int consoleCheckForEnter(uint64_t* enterResult);
 void consoleCleanup();
 
 
@@ -129,10 +132,17 @@ int ioGetNextCommandArgument(char** argumentUTF8, uint64_t* argumentByteLength);
 int ioGetCommandArgument(uint64_t argumentNumber, char** argumentUTF8, uint64_t* argumentByteLength);
 int ioOpenFile(void** filePtr, char* filePathUTF8, int filePathBytes, uint64_t flags);
 int ioCloseFile(void** filePtr);
-int ioGetFileSize(void** filePtr, uint64_t* fileSizeBytes);
-int ioReadFile(void** filePtr, void* dataPtr, uint32_t numBytes);
+int ioGetFileSize(void* filePtr, uint64_t* fileSizeBytes);
+int ioReadFile(void* filePtr, void* dataPtr, uint32_t* numBytess);
 int ioWriteFile(void* filePtr, void* dataPtr, uint32_t numBytes);
+int ioAsyncSetup(uint64_t asyncOperationCount);
+int ioAsyncSignalWait(uint64_t asyncOperation);
+int ioAsyncSignalCheck(uint64_t asyncOperation, uint64_t* signaled);
+int ioAsyncWriteFile(void* filePtr, void* dataPtr, uint64_t numBytes, uint64_t asyncOperation, uint64_t offset);
+void ioAsyncCleanup();
 int ioSelectAndOpenFile(void** filePtr, uint64_t flags, char* filePathUTF8);
+int ioLoadLibrary(void** libraryPtr, char* libraryNameUTF8);
+int ioGetLibraryFunction(void* libraryPtr, char* functionNameUTF8, void** functionPtr);
 void ioCleanup();
 
 
@@ -141,39 +151,20 @@ int compatibilitySetup();
 void compatibilityCleanup();
 
 
-// Compatibility Graphics Functions:
-void compatibilityGraphicsGetError();
+int syncCreateEvent(void** eventPtr, uint64_t manualReset, uint64_t initialState);
+int syncSetEvent(void* eventPtr);
+int syncResetEvent(void* eventPtr);
+int syncEventWait(void* eventPtr);
+int syncEventCheck(void* eventPtr, uint64_t* signaled);
+void syncCloseEvent(void** eventPtr);
 
-// Vulkan Functions:
-void vulkanGetError(int* error);
-int vulkanWindowCreate();
-
-// Nvidia Functions For Cuda and NVENC Libraries:
-void nvidiaGetError(int* error);
-
-
-int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
-int desktopDuplicationLoadLUT();
-int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr);
-
-int desktopDuplicationStart(uint64_t fps);
-int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount);
-int desktopDuplicationStop();
-
-int desktopDuplicationGetFrame();
-
-int desktopDuplicationSetFrameRate(uint64_t fps);
-int desktopDuplicationEncodeNextFrame(void* bitstreamFilePtr, uint64_t* frameWriteCount);
-int desktopDuplicationPrintEncodingStats();
-
-int desktopDuplicationCleanup();
-
-
-
-
+typedef int (*PFN_ThreadStart)();
+int syncStartThread(void** threadPtr, PFN_ThreadStart threadStart, uint64_t initialState);
+//thread check if running
 
 
 // General Compatibility Errors:
+#define ERROR_PARSE_ISSUE 0x0FFD
 #define ERROR_ARGUMENT_DNE 0x0FFE
 #define ERROR_INVALID_ARGUMENT 0x0FFF
 #define ERROR_TIMER_BAD 0x1000
@@ -196,13 +187,114 @@ int desktopDuplicationCleanup();
 #define ERROR_IO_WRONG_READ_SIZE 0x1011
 #define ERROR_IO_CANNOT_WRITE_FILE 0x1012
 #define ERROR_IO_WRONG_WRITE_SIZE 0x1013
+#define ERROR_IO_CANNOT_LOAD_LIBRARY 0x01040
+#define ERROR_IO_CANNOT_FIND_LIBRARY_FUNCTION 0x01041
 #define ERROR_EVENT_NOT_CREATED 0x1014
 #define ERROR_THREAD_NOT_CREATED 0x1015
 #define ERROR_EVENT_NOT_SET 0x1016
+#define ERROR_EVENT_NOT_RESET 0x1017
+#define ERROR_CONSOLE_PEAK_INPUT 0x1018
 
 #define ERROR_TBD 0x103F
 
+
+#ifndef COMPATIBILITY_GRAPHICS_UNNEEDED
+
 #define NVIDIA_PCI_VENDER_ID 4318
+
+// Graphics Functions:
+void graphicsGetError();
+int graphicsDesktopDuplicationSetup(uint32_t* width, uint32_t* height, uint32_t* venderID);
+int graphicsDesktopDuplicationReleaseFrame();
+int graphicsDesktopDuplicationAcquireNextFrame(uint64_t millisecondTimeout, uint64_t* presentationTime, uint64_t* accumulatedFrames);
+void graphicsDesktopDuplicationCleanup();
+
+
+//Vulkan:
+//Include Common Vulkan
+#include "include/vulkan/vk_platform.h"
+#include "include/vulkan/vulkan_core.h"
+
+// Vulkan Allocator:
+#define VULKAN_ALLOCATOR NULL
+void vulkanGetError(int* error);
+void vulkanCleanup();
+int vulkanGetMemoryTypeIndex(VkDevice device, uint32_t* deviceLocalMemIndex, uint32_t* cpuAccessMemIndex);
+int vulkanImportDesktopDuplicationImage(VkDevice device, VkImage* ddImage, VkDeviceMemory* ddImportMem);
+int vulkanCreateExportImageMemory(VkDevice device, VkImageCreateInfo* imgCreateInfo, char* nameUTF8, VkImage* image, VkDeviceMemory* exportMem);
+
+/* Vulkan device flags
+#define VULKAN_DEVICE_GRAPHICS_COMPUTE_TRANSFER_FLAG 0x0001
+#define VULKAN_DEVICE_COMPUTE_FLAG 0x0002
+#define VULKAN_DEVICE_TRANSFER_FLAG 0x0004
+#define VULKAN_DEVICE_VIDEO_FLAG 0x0008
+#define VULKAN_DEVICE_MEMORY_IMPORT_FLAG 0x0010
+#define VULKAN_DEVICE_MEMORY_EXPORT_FLAG 0x0020
+#define VULKAN_DEVICE_SEPERATE_COMPUTE_FLAG 0x0040
+#define VULKAN_DEVICE_COMPUTE_CAN_TRANSFER_FLAG 0x0080
+#define VULKAN_DEVICE_GRAPHICS_CAN_PRESENT_FLAG 0x0100
+#define VULKAN_DEVICE_VIDEO_CAN_TRANSFER_FLAG 0x0200
+#define VULKAN_DEVICE_SEPERATE_TRANSFER_FLAG 0x0400
+//*/
+
+// Vulkan Functions:
+int vulkanComputeSetup(VkDevice* device, uint32_t* computeQFI, uint32_t* transferQFI);
+int vulkanVideoSetup(VkDevice* device, uint32_t* graphicsComputeTransferQFI, uint32_t* videoQFI,
+	VkVideoProfileInfoKHR* videoProfileInfo, VkVideoCapabilitiesKHR* videoCapabilities,
+	uint32_t* fmtCount, VkVideoFormatPropertiesKHR* videoFormatProps);
+
+int vulkanWindowSetup(uint64_t windowWidth, uint64_t windowHeight, VkDevice* device,
+	uint32_t* graphicsTransferPresentationQFI, VkQueue* graphicsTransferQueue, uint32_t* videoQFI);
+int vulkanWindowProcessMessages(uint64_t* windowInformation);
+int vulkanWindowStart(uint64_t renderWidth, uint64_t renderHeight, VkImage inputImage, VkFence copyFence);
+int vulkanWindowRenderNext(VkFence copyFence);
+int vulkanWindowResize();
+int vulkanWindowFullscreenToggle();
+void vulkanWindowCleanup();
+
+
+#include "include/cudaTypedefs.h"
+typedef struct NvidiaCudaFunctions {
+	PFN_cuDevicePrimaryCtxGetState cuDevicePrimaryCtxGetState;
+	PFN_cuDevicePrimaryCtxRetain cuDevicePrimaryCtxRetain;
+	PFN_cuCtxPushCurrent cuCtxPushCurrent;
+	PFN_cuCtxPopCurrent cuCtxPopCurrent;
+	PFN_cuCtxGetLimit cuCtxGetLimit;
+	PFN_cuCtxSetLimit cuCtxSetLimit;
+	PFN_cuExternalMemoryGetMappedMipmappedArray cuExternalMemoryGetMappedMipmappedArray;
+	PFN_cuMipmappedArrayGetLevel cuMipmappedArrayGetLevel;
+} NvidiaCudaFunctions;
+
+void nvidiaGetError(int* error);
+int nvidiaCudaSetup(CUdevice* cudaDevice, NvidiaCudaFunctions* nvCuFun);
+int nvidiaCudaImportVulkanMemory(VkDevice device, VkImage exportImage, VkDeviceMemory exportMemory, CUexternalMemory* cuExtMem);
+void nvidiaCudaCleanup();
+
+
+
+
+/*
+
+//Screen Recording
+int desktopDuplicationSetup(size_t shaderSize, uint32_t* shaderData, void** lutBufferPtr);
+int desktopDuplicationLoadLUT();
+int desktopDuplicationTestFrame(void* rawARGBfilePtr, void* bitstreamFilePtr);
+
+int desktopDuplicationStart(uint64_t fps);
+int desktopDuplicationRun(void* bitstreamFilePtr, uint64_t* frameWriteCount);
+int desktopDuplicationStop();
+
+int desktopDuplicationGetFrame();
+
+int desktopDuplicationSetFrameRate(uint64_t fps);
+int desktopDuplicationEncodeNextFrame(void* bitstreamFilePtr, uint64_t* frameWriteCount);
+int desktopDuplicationPrintEncodingStats();
+
+int desktopDuplicationCleanup();
+
+//*/
+
+
 
 // Vulkan Errors:
 #define ERROR_VULKAN_EXTRA_INFO 0x5040
@@ -222,11 +314,11 @@ int desktopDuplicationCleanup();
 #define ERROR_VULKAN_COM_BUF_BEGIN_FAILED 0x504E
 #define ERROR_VULKAN_COM_BUF_END_FAILED 0x504F
 #define ERROR_VULKAN_MEM_MAP_FAILED 0x5050
+#define ERROR_VULKAN_WINDOW_ALREADY_EXISTS 0x5051
+#define ERROR_VULKAN_WINDOW_MUST_FIX 0x5052
+#define ERROR_VULKAN_WINDOW_SHOULD_FIX 0x5053
+#define ERROR_VULKAN_WINDOW_IS_PAUSED 0x5054
 #define ERROR_VULKAN_TBD 0x507F
-
-
-
-
 
 
 #define ERROR_DESKDUPL_CREATE_FACTORY 0x5000
@@ -247,7 +339,6 @@ int desktopDuplicationCleanup();
 #define ERROR_DESKDUPL_CREATE_SHARED_HANDLE 0x500F
 #define ERROR_DESKDUPL_KEYEDMUTEX_QUERY 0x5010
 #define ERROR_DESKDUPL_WRONG_STATE 0x5011
-
 
 
 #define ERROR_CUDA_NO_INIT 0x5080
@@ -288,7 +379,13 @@ int desktopDuplicationCleanup();
 
 #define ERROR_NVENC_EXTRA_INFO 0x9000
 
-//Network Stuff
+
+#endif
+
+
+
+
+#ifndef COMPATIBILITY_NETWORK_UNNEEDED //Network Stuff
 
 #define ERROR_NETWORK_WRONG_STATE 0x6000
 #define ERROR_NETWORK_UNDEFINED 0x6001
@@ -302,13 +399,6 @@ int desktopDuplicationCleanup();
 
 #define NETWORK_RECV_PENDING 1
 #define NETWORK_SEND_PENDING 2
-
-
-
-
-
-
-
 
 
 // Network Functions:
@@ -333,8 +423,7 @@ int networkGetNextSendMessageBuffer(uint8_t** sendMsgBuf, uint64_t* sendMsgMaxBy
 int networkSendMessage(netAddrPortFlow* addrPort, uint64_t sendBytes);
 int networkWaitOnSentMessages();
 
-
-
+#endif
 
 
 

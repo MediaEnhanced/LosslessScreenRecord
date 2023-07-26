@@ -4,10 +4,10 @@ Press <Enter> to Exit
 Program Started!
 OS Graphics Error Info: 
 Vulkan Error Info: 
-Network Error Info: 
 NVIDIA Cuda or Encoder Error Info: 
-Intel Encoder Error Info: 
+INTEL Encoder Error Info: 
 AMD Encoder Error Info: 
+Network Error Info: 
 Program Ran Successfully!
 Total Program Run Time: 
 us
@@ -23,12 +23,34 @@ d
  hours
  days
 ỤȾƑ-8 įṡ Ẅồřκȉȵɠ
-Attempting to Startup Desktop Duplication
-Desktop Duplication Successfully Started
+Setting up Desktop Duplication
+Desktop Duplication Successfully Setup
+Setting up Vulkan Compute Path
+Vulkan Compute Path Successfully Setup
+Setting up NVIDIA Encoder (using Cuda)
+NVIDIA Encoder Setup
+Setting up INTEL Encoder
+INTEL Encoder Setup
+Setting up AMD Encoder
+AMD Encoder Setup
+Graphics Vender Not Currently Compatibile
+Opening Bitstream File for Writing
+Opened: "bitstream.h265"
 Press <Enter> to Start Recording
 Recording 60 seconds at 60 fps
+Small Helper Thread Started
 Recording Finshed and Saved: "bitstream.h265"
 Only Partial Record Saved: "bitstream.h265"
+Avg Acquire Latency in us: 
+Avg Compute Latency in us: 
+Avg Encoder Latency in us: 
+Repeated Frame Count: 
+Missed Timing Count:  
+Misc Issue Count: 
+Avg Acquired Frames:  
 Creating Vulkan Window
-Opening File for Vulkan Video Playback
+Press <Enter> to Stop
+Closed Vulkan Window
+Opening Bitstream File for Vulkan Video Reading
 
+Graphics 

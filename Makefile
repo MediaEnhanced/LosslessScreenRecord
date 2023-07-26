@@ -37,27 +37,39 @@ default_target: WindowsExecutables
 ./bin/obj/:
 	cmd /c mkdir .\bin\obj
 
+./bin/lib/:
+	cmd /c mkdir .\bin\lib
+
 ./bin/spv/:
 	cmd /c mkdir .\bin\spv
 
 #Common Compiler (gcc) arguments
-CompilerArguments = -std=c11 -O2 -m64 -mconsole -mabi=ms
-  # -ffreestanding... look into later
+CompilerArguments = -std=c11 -O2 -m64 -mabi=ms -ffreestanding -fno-exceptions -fno-unwind-tables
+  # -ffreestanding
 CompilerWarnings = -Wall
  # -Wextra -Wwrite-strings -pedantic -g3 More Warnings in the future
 
 ./bin/obj/compatibility.o: ./src/compatibility.c ./src/compatibility.h | ./bin/obj/
-	gcc $(CompilerArguments) -O1 $(CompilerWarnings) -c -o ./bin/obj/compatibility.o ./src/compatibility.c
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibility.o ./src/compatibility.c
  #-O1 to counter the automatic memset insert until functions get converted to assembly
+ # generate elf output format in future
 
 ./bin/obj/compatibilityAssembly.o: ./src/compatibilityAssembly.asm | ./bin/obj/
 	FASM ./src/compatibilityAssembly.asm ./bin/obj/compatibilityAssembly.o
 
-./bin/obj/compatibilityWin32.o: ./src/compatibilityWin32.c ./src/compatibility.h ./src/math.h | ./bin/obj/
+./bin/obj/compatibilityWin32.o: ./src/compatibilityWin32.c ./src/compatibility.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibilityWin32.o ./src/compatibilityWin32.c
  #-fstack-usage to output stack usage per function so that it can be adjusted to be lower than 4096 bytes
 
-CompatibilityWindowsObjects = ./bin/obj/compatibilityWin32.o ./bin/obj/compatibility.o ./bin/obj/compatibilityAssembly.o
+./bin/obj/compatibilityWin32Graphics.o: ./src/compatibilityWin32Graphics.c ./src/compatibility.h ./src/math.h | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibilityWin32Graphics.o ./src/compatibilityWin32Graphics.c
+
+./bin/obj/compatibilityWin32Network.o: ./src/compatibilityWin32Network.c ./src/compatibility.h ./src/math.h | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/compatibilityWin32Network.o ./src/compatibilityWin32Network.c
+
+CompatibilityWindowsObjects =  ./bin/obj/compatibility.o ./bin/obj/compatibilityAssembly.o ./bin/obj/compatibilityWin32.o ./bin/obj/compatibilityWin32Graphics.o ./bin/obj/compatibilityWin32Network.o
+./bin/lib/compatibilityWin32.a: $(CompatibilityWindowsObjects) | ./bin/lib/
+	ar cr ./bin/lib/compatibilityWin32.a $(CompatibilityWindowsObjects)
 
 ./bin/obj/math.o: ./src/math.c ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/math.o ./src/math.c
@@ -71,15 +83,20 @@ CompatibilityWindowsObjects = ./bin/obj/compatibilityWin32.o ./bin/obj/compatibi
 ./bin/obj/exp2.o: ./src/exp2.c ./src/math.h | ./bin/obj/
 	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/exp2.o ./src/exp2.c
 
-MathObjects = ./bin/obj/log2.o ./bin/obj/exp2.o ./bin/obj/math.o ./bin/obj/mathAssembly.o 
+MathObjects = ./bin/obj/math.o ./bin/obj/mathAssembly.o ./bin/obj/log2.o ./bin/obj/exp2.o
+./bin/lib/math.a: $(MathObjects) | ./bin/lib/
+	ar cr ./bin/lib/math.a $(MathObjects)
 
 ProgramEntry = ./src/compatibility.h ./src/programStrings.h ./src/programEntry.h
 
-./bin/obj/main.o: ./src/main.c $(ProgramEntry) ./src/math.h | ./bin/obj/
-	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/main.o ./src/main.c
+./bin/obj/desktopDuplicationWindow.o: ./src/desktopDuplicationWindow.c $(ProgramEntry) | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/desktopDuplicationWindow.o ./src/desktopDuplicationWindow.c
 
-./bin/obj/playback.o: ./src/playback.c $(ProgramEntry) | ./bin/obj/
-	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/playback.o ./src/playback.c
+./bin/obj/losslessScreenRecord.o: ./src/losslessScreenRecord.c $(ProgramEntry) ./src/math.h | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/losslessScreenRecord.o ./src/losslessScreenRecord.c
+
+./bin/obj/bitstreamFrameExtract.o: ./src/bitstreamFrameExtract.c $(ProgramEntry) | ./bin/obj/
+	gcc $(CompilerArguments) $(CompilerWarnings) -c -o ./bin/obj/bitstreamFrameExtract.o ./src/bitstreamFrameExtract.c
 
 ./bin/CreateStringsData.exe: ./src/createStringsData.c ./src/elf.h | ./bin
 	gcc $(CompilerArguments) $(CompilerWarnings) -s -o ./bin/CreateStringsData.exe ./src/createStringsData.c
@@ -108,12 +125,13 @@ CheckLossless: ./bin/CheckLosslessSRGBtoYUV.exe
 	./bin/CheckLosslessSRGBtoYUV.exe
 
 LocalLibraryDirectory = -L./lib/
-LocalLibraries = -l:vulkan-1.lib -l:cuda.lib -l:nvencodeapi.lib
+LocalLibraries = -l:vulkan-1.lib
  # vulkan-1.lib is needed for Vulkan ("Middleman" Compute Pipeline)
- # cuda.lib & nvencodeapi.lib is needed for NVIDIA Encoding
+ # -l:cuda.lib & -l:nvencodeapi.lib was needed for NVIDIA Encoding (the libraries are now loaded during runtime if needed)
 
 WindowsLibraryDirectory = -LC:/Windows/System32
-Libraries = -l:kernel32.dll -l:dxgi.dll -l:d3d11.dll -l:ws2_32.dll
+ # should maybe point to mingw library directory here in future
+Libraries = -l:kernel32.dll -l:user32.dll -l:dxgi.dll -l:d3d11.dll -l:ws2_32.dll 
  # kernel32.dll is needed for the basic Window OS API interface
  # dxgi.dll & d3d11.dll is needed for Windows Desktop Duplication
  # ws2_32.dll is needed for Windows networking (sockets)
@@ -123,24 +141,33 @@ LinkerLibraries = $(LocalLibraryDirectory) $(LocalLibraries) $(WindowsLibraryDir
  #gccLibraryDirectory = -LC:/mingw64/lib/gcc/x86_64-w64-mingw32/13.1.0
  #gccLibraries = -lgcc
  #needed for gcc automatic windows function stack correction (when a function uses more than 4096 bytes / a page for the stack)
+ #TempLibraries = $(gccLibraryDirectory) $(gccLibraries)
 
-TempLibraries = $(gccLibraryDirectory) $(gccLibraries)
+WindowsLinkingObjects = ./bin/lib/compatibilityWin32.a ./bin/lib/math.a ./bin/obj/stringsData.o ./bin/obj/win32Resource.o
+WindowsLibraries = -lkernel32 -luser32 -ldxgi -ld3d11 -lws2_32
 
-WindowsLinkingObjects = $(CompatibilityWindowsObjects) $(MathObjects) ./bin/obj/stringsData.o ./bin/obj/win32Resource.o
+./bin/DesktopDuplicationWindow.exe: ./bin/obj/desktopDuplicationWindow.o $(WindowsLinkingObjects)
+	ld -o ./bin/DesktopDuplicationWindow.exe -eprogramEntry -s --gc-sections --subsystem console \
+	./bin/obj/desktopDuplicationWindow.o $(WindowsLinkingObjects) \
+	$(LinkerLibraries)
+ #$(TempLibraries)
+ #gcc -Wall -m64 -mconsole -O2 -s -nostartfiles -Wl,-eprogramEntry -Wl,--gc-sections \
+ #-o ./bin/VulkanWindowDuplication.exe ./bin/obj/desktopDuplicationWindow.o $(WindowsLinkingObjects) \
+ #$(LocalLibraryDirectory) $(LocalLibraries) $(WindowsLibraries)
 
-./bin/LosslessScreenRecord.exe: ./bin/obj/main.o $(WindowsLinkingObjects) ./bin/obj/binData.o
-	ld -o ./bin/LosslessScreenRecord.exe -eprogramEntry -s -static --gc-sections \
-	./bin/obj/main.o $(WindowsLinkingObjects) ./bin/obj/binData.o \
+./bin/LosslessScreenRecord.exe: ./bin/obj/losslessScreenRecord.o $(WindowsLinkingObjects) ./bin/obj/binData.o
+	ld -o ./bin/LosslessScreenRecord.exe -eprogramEntry -s --gc-sections --subsystem console \
+	./bin/obj/losslessScreenRecord.o $(WindowsLinkingObjects) ./bin/obj/binData.o \
 	$(LinkerLibraries)
  #$(TempLibraries)
 
-./bin/VulkanVideoPlayback.exe: ./bin/obj/playback.o $(WindowsLinkingObjects)
-	ld -o ./bin/VulkanVideoPlayback.exe -eprogramEntry -s -static --gc-sections \
-	./bin/obj/playback.o $(WindowsLinkingObjects) \
+./bin/BitstreamFrameExtract.exe: ./bin/obj/bitstreamFrameExtract.o $(WindowsLinkingObjects)
+	ld -o ./bin/BitstreamFrameExtract.exe -eprogramEntry -s --gc-sections --subsystem console \
+	./bin/obj/bitstreamFrameExtract.o $(WindowsLinkingObjects) \
 	$(LinkerLibraries)
  #$(TempLibraries)
 
-WindowsExecutables: ./bin/LosslessScreenRecord.exe ./bin/VulkanVideoPlayback.exe
+WindowsExecutables: ./bin/DesktopDuplicationWindow.exe ./bin/LosslessScreenRecord.exe ./bin/BitstreamFrameExtract.exe
 
 WindowsClean:
 	cmd /c rmdir /s /q .\bin

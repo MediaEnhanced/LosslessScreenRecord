@@ -23,11 +23,13 @@
 ;Utilizes AVX2 and FMA instructions (needs a modernish CPU)
 ;Assembled by Flat Assembler (FASM) 
 
-format ELF64 ;This format is compatible with ld
+format MS64 COFF ;This format is compatible with mingw's ld...
 ;Uses Microsoft x64 Calling Convention
 ;rax, rcx, rdx, r8-r11 are volatile
 ;Trying not to directly modify the stack pointer register rsp
 ;Does Not "Push" or "Pop" Non-Volatile XMM registers
+
+section '.text' code readable executable
 
 public roundDouble
 roundDouble:

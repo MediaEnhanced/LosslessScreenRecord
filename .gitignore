@@ -16,4 +16,8 @@ bin/
 # Media Files
 *.h265
 *.argb
+*.rgb
+*.yuv
+
+# Converted Media Files
 *.mp4

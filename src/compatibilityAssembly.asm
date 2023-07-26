@@ -22,12 +22,14 @@
 ;x64 Assembly Helper Functions
 ;Assembled by Flat Assembler (FASM) 
 
-format ELF64 ;This format is compatible with ld
+format MS64 COFF ;This format is compatible with mingw's ld...
 ;Uses Microsoft x64 Calling Convention
 ;rax, rcx, rdx, r8-r11 are volatile
 ;Trying not to directly modify the stack pointer register rsp
 ;Does Not "Push" or "Pop" Non-Volatile XMM registers
 ;Does Not do complete / comprehensible error checking (designed to run very fast)
+
+section '.text' code readable executable
 
 public numToFHexStr ;64-bit number converted to a hexadecimal number UTF-8 string
 numToFHexStr:
